@@ -1,11 +1,11 @@
 # app.py
-# Instructor-demo-ready build (per-part uploads + persistent upload confirmation):
+# Instructor-demo-ready build (per-part uploads + persistent "upload successful" message):
 # - Assignment -> Problem navigation
 # - Numeric answer entry per part
 # - CSV grading with tolerance
 # - Attempt logging (SQLite)
 # - Upload workflow PER PART (PDF) shown only when that part is incorrect
-# - Persistent "upload successful" indicator per part (so it doesn't feel like it disappears)
+# - Persistent "✅ Upload successful..." message per part (survives Streamlit reruns)
 # - Fallback form PER PART if PDF can't be read (or if student prefers)
 #
 # File structure:
@@ -84,8 +84,8 @@ def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_v
 
 def upload_state_key(attempt_id: str, part_id: str) -> str:
     """
-    Session-state key to remember that a PDF was uploaded successfully
-    for a particular (attempt_id, part_id), so the UI can show persistent confirmation.
+    Session-state key that tracks whether a PDF upload succeeded
+    for (attempt_id, part_id), so we can show a persistent confirmation.
     """
     return f"uploaded_{attempt_id}_{part_id}"
 
@@ -425,12 +425,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     attempt_id = log_attempt(assignment, pid)
     st.session_state["last_attempt_id"] = attempt_id
 
-    # Reset upload confirmations for this attempt (fresh attempt)
-    # (This keeps state clean even if user reuses same browser session.)
-    for p in parts:
-        part_id = str(p.get("part_id", "")).strip() or "?"
-        st.session_state.pop(upload_state_key(attempt_id, part_id), None)
-
     st.success(f"Submission logged. Attempt ID: {attempt_id[:8]}")
     st.subheader("Results")
 
@@ -469,9 +463,9 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 
         state_key = upload_state_key(attempt_id, part_id)
 
-        # If already uploaded in this session, show persistent confirmation
-        if st.session_state.get(state_key):
-            st.success("PDF uploaded successfully.")
+        # ✅ Always show persistent success message if uploaded already
+        if st.session_state.get(state_key) is True:
+            st.success("✅ Upload successful. Your work has been saved.")
         else:
             uploaded = st.file_uploader(
                 f"Upload PDF for Part ({part_id})",
@@ -480,23 +474,22 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
             )
 
             if uploaded is not None:
-                readable, extracted_len, _stored_path = save_upload(attempt_id, part_id, uploaded)
+                readable, _extracted_len, _stored_path = save_upload(attempt_id, part_id, uploaded)
 
-                # Mark upload as successful in session state
+                # ✅ Persist upload success so message survives reruns
                 st.session_state[state_key] = True
 
-                if readable:
-                    st.success("PDF uploaded and readable.")
-                else:
+                # ✅ Immediate feedback (even if reruns, the block above will still show it)
+                st.success("✅ Upload successful. Your work has been saved.")
+
+                if not readable:
                     st.warning(
-                        "PDF uploaded, but could not be confidently read. "
+                        "⚠️ We could not confidently read this PDF. "
                         "Please complete the fallback form below."
                     )
 
-        with st.expander(
-            f"Fallback form for Part ({part_id})",
-            expanded=False
-        ):
+        # Fallback form (always accessible)
+        with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
             balance = st.text_area(
                 "Paste the balance(s)/equation(s) you used (text)",
                 height=120,
@@ -509,7 +502,7 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
             )
             if st.button("Save fallback info", key=f"{attempt_id}_{part_id}_save_fallback"):
                 save_fallback(attempt_id, part_id, balance, notes)
-                st.success("Saved. (Later, the AI will use this for feedback.)")
+                st.success("✅ Additional information saved.")
 
 
 # -----------------------------
@@ -525,7 +518,7 @@ safe_mkdir(LOGS_DIR)
 db_init()
 
 st.title("MEB Homework Tutor — Instructor Demo (Per-Part Uploads)")
-st.caption("Per-part PDF uploads now show a persistent 'upload successful' message.")
+st.caption("Per-part uploads now show a persistent '✅ Upload successful' message.")
 
 # Load assignments
 try:
