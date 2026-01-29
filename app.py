@@ -1,31 +1,50 @@
+# app.py
+# MEB Homework Tutor — Instructor Demo (Cloud-friendly)
+#
+# Current focus (per your request):
+# ✅ Numeric answer entry per part + tolerance grading from CSV
+# ✅ Attempt logging (SQLite in /tmp)
+# ✅ Per-part PDF upload AFTER incorrect submission
+# ✅ Upload verification WITHOUT saving to disk:
+#    - Store PDF bytes in-memory (st.session_state)
+#    - Show persistent "Upload received" panel with filename, size, SHA256
+#    - Provide a download button as proof the upload is captured
+#
+# NOTE: No AI yet. Upload exists only to verify capture for later AI processing.
+
 import csv
 import json
 import sqlite3
 import uuid
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 import streamlit as st
 
-# Optional typed-PDF extraction
+# Optional typed-PDF extraction (not required for upload verification)
 try:
     import PyPDF2  # type: ignore
     HAS_PYPDF2 = True
 except Exception:
     HAS_PYPDF2 = False
 
+
 # -----------------------------
-# Paths
+# Paths (repo vs runtime)
 # -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
+
+# Repo data (committed to GitHub)
 DATA_DIR = BASE_DIR / "data"
 PROBLEMS_DIR = DATA_DIR / "problems"
 ASSIGNMENTS_FILE = DATA_DIR / "assignments.json"
 ANSWER_KEY_FILE = DATA_DIR / "answer_key.csv"
 
-UPLOADS_DIR = DATA_DIR / "uploads"
-LOGS_DIR = DATA_DIR / "logs"
+# Runtime data (writable on Streamlit Community Cloud)
+RUNTIME_DIR = Path("/tmp/cheme_tutor_runtime")
+LOGS_DIR = RUNTIME_DIR / "logs"
 DB_FILE = LOGS_DIR / "attempts.sqlite3"
 
 
@@ -58,6 +77,36 @@ def upload_state_key(attempt_id: str, part_id: str) -> str:
     return f"uploaded_{attempt_id}_{part_id}"
 
 
+def _sha256(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+# -----------------------------
+# In-memory upload store (proof of upload)
+# -----------------------------
+def store_upload_in_memory(attempt_id: str, part_id: str, uploaded_file) -> Dict[str, Any]:
+    """
+    Stores PDF bytes in Streamlit session_state. No disk storage.
+    This is the simplest "verify upload" approach on Streamlit Cloud.
+    """
+    file_bytes = uploaded_file.getvalue()
+    info = {
+        "filename": uploaded_file.name,
+        "bytes": file_bytes,
+        "size": len(file_bytes),
+        "sha256": _sha256(file_bytes),
+        "uploaded_utc": utc_now_iso(),
+    }
+    st.session_state["uploaded_files"].setdefault(attempt_id, {})
+    st.session_state["uploaded_files"][attempt_id][part_id] = info
+    st.session_state[upload_state_key(attempt_id, part_id)] = True
+    return info
+
+
+def get_upload_from_memory(attempt_id: str, part_id: str) -> Optional[Dict[str, Any]]:
+    return st.session_state.get("uploaded_files", {}).get(attempt_id, {}).get(part_id)
+
+
 # -----------------------------
 # Data loading
 # -----------------------------
@@ -78,6 +127,10 @@ def load_problem(problem_id: str) -> dict:
 
 @st.cache_data
 def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
+    """
+    CSV columns required:
+      problem_id, part_id, answer_value, answer_units, tolerance_type, tolerance_value
+    """
     key: Dict[Tuple[str, str], Dict[str, str]] = {}
     if not ANSWER_KEY_FILE.exists():
         return key
@@ -86,15 +139,15 @@ def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
         reader = csv.DictReader(f)
         required = {"problem_id", "part_id", "answer_value", "answer_units", "tolerance_type", "tolerance_value"}
         if reader.fieldnames is None or not required.issubset(set(reader.fieldnames)):
-            raise ValueError(
-                f"{ANSWER_KEY_FILE} must include columns: {', '.join(sorted(required))}"
-            )
+            raise ValueError(f"{ANSWER_KEY_FILE} must include columns: {', '.join(sorted(required))}")
+
         for row in reader:
             pid = (row.get("problem_id") or "").strip()
             part_id = (row.get("part_id") or "").strip()
             if not pid or not part_id:
                 continue
             key[(pid, part_id)] = {k: (v or "").strip() for k, v in row.items()}
+
     return key
 
 
@@ -123,7 +176,7 @@ def grade_part(problem_id: str, part_id: str, student_text: str,
 
 
 # -----------------------------
-# Database
+# Database (attempt logging only)
 # -----------------------------
 def db_connect() -> sqlite3.Connection:
     safe_mkdir(LOGS_DIR)
@@ -155,19 +208,6 @@ def db_init() -> None:
             );
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS uploads (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attempt_id TEXT NOT NULL,
-                part_id TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                stored_path TEXT NOT NULL,
-                extracted_text_len INTEGER NOT NULL,
-                readable INTEGER NOT NULL,
-                created_utc TEXT NOT NULL,
-                FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id) ON DELETE CASCADE
-            );
-        """)
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS fallback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 attempt_id TEXT NOT NULL,
@@ -192,7 +232,8 @@ def log_attempt(assignment: str, problem_id: str) -> str:
     return attempt_id
 
 
-def log_attempt_part(attempt_id: str, part_id: str, student_answer: str, is_correct: Optional[bool], message: str) -> None:
+def log_attempt_part(attempt_id: str, part_id: str, student_answer: str,
+                     is_correct: Optional[bool], message: str) -> None:
     with db_connect() as conn:
         conn.execute("""
             INSERT INTO attempt_parts (attempt_id, part_id, student_answer, is_correct, message)
@@ -224,90 +265,6 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
         return list(cur.fetchall())
 
 
-def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-    with db_connect() as conn:
-        cur = conn.execute("""
-            SELECT u.created_utc, u.attempt_id, u.part_id, u.filename, u.stored_path, u.readable, u.extracted_text_len
-            FROM uploads u
-            JOIN attempts a ON a.attempt_id = u.attempt_id
-            WHERE a.problem_id = ?
-            ORDER BY u.created_utc DESC
-            LIMIT ?
-        """, (problem_id, limit))
-        rows = cur.fetchall()
-
-    out: List[Dict[str, Any]] = []
-    for created_utc, attempt_id, part_id, filename, stored_path, readable, extracted_len in rows:
-        out.append({
-            "created_utc": created_utc,
-            "attempt_id": attempt_id,
-            "part_id": part_id,
-            "filename": filename,
-            "stored_path": stored_path,
-            "readable": bool(readable),
-            "extracted_text_len": int(extracted_len),
-        })
-    return out
-
-
-def debug_last_upload_rows(limit: int = 10) -> List[Tuple[Any, ...]]:
-    with db_connect() as conn:
-        cur = conn.execute("""
-            SELECT id, created_utc, attempt_id, part_id, filename, stored_path, readable, extracted_text_len
-            FROM uploads
-            ORDER BY id DESC
-            LIMIT ?
-        """, (limit,))
-        return cur.fetchall()
-
-
-def debug_upload_count() -> int:
-    with db_connect() as conn:
-        cur = conn.execute("SELECT COUNT(*) FROM uploads;")
-        return int(cur.fetchone()[0])
-
-
-# -----------------------------
-# Uploads + readability
-# -----------------------------
-def try_extract_pdf_text(pdf_bytes: bytes) -> str:
-    if not HAS_PYPDF2:
-        return ""
-    try:
-        reader = PyPDF2.PdfReader(pdf_bytes)  # type: ignore
-        text_chunks = []
-        for page in reader.pages:
-            text_chunks.append(page.extract_text() or "")
-        return "\n".join(text_chunks).strip()
-    except Exception:
-        return ""
-
-
-def save_upload(attempt_id: str, part_id: str, uploaded_file) -> Tuple[bool, int, str]:
-    safe_mkdir(UPLOADS_DIR)
-    part_dir = UPLOADS_DIR / attempt_id / part_id
-    safe_mkdir(part_dir)
-
-    filename = uploaded_file.name
-    stored_path = part_dir / filename
-
-    file_bytes = uploaded_file.getvalue()
-    stored_path.write_bytes(file_bytes)
-
-    extracted = try_extract_pdf_text(file_bytes)
-    readable = bool(extracted and len(extracted) >= 30)
-    extracted_len = len(extracted)
-
-    with db_connect() as conn:
-        conn.execute("""
-            INSERT INTO uploads (attempt_id, part_id, filename, stored_path, extracted_text_len, readable, created_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (attempt_id, part_id, filename, str(stored_path), extracted_len, int(readable), utc_now_iso()))
-        conn.commit()
-
-    return readable, extracted_len, str(stored_path)
-
-
 def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: str) -> None:
     with db_connect() as conn:
         conn.execute("""
@@ -318,12 +275,31 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
 
 
 # -----------------------------
+# Optional: PDF text extraction helper (not used yet for AI)
+# -----------------------------
+def try_extract_pdf_text(pdf_bytes: bytes) -> str:
+    if not HAS_PYPDF2:
+        return ""
+    try:
+        # PyPDF2 can accept a file-like object. We'll wrap bytes.
+        from io import BytesIO
+        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))  # type: ignore
+        chunks = []
+        for page in reader.pages:
+            chunks.append(page.extract_text() or "")
+        return "\n".join(chunks).strip()
+    except Exception:
+        return ""
+
+
+# -----------------------------
 # Session state
 # -----------------------------
 def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
     st.session_state.setdefault("last_attempt_id", None)
+    st.session_state.setdefault("uploaded_files", {})  # attempt_id -> part_id -> info dict
 
 
 # -----------------------------
@@ -362,8 +338,7 @@ def sidebar_tab_attempt_history(problem_id: str) -> None:
         st.sidebar.caption("No attempts yet.")
         return
 
-    labels = []
-    ids = []
+    labels, ids = [], []
     for created_utc, attempt_id in rows:
         labels.append(f"{created_utc} ({attempt_id[:8]})")
         ids.append(attempt_id)
@@ -383,77 +358,61 @@ def sidebar_tab_attempt_history(problem_id: str) -> None:
         st.caption(f"Attempt ID: {attempt_id}")
 
 
-def sidebar_tab_uploaded_files(problem_id: str) -> None:
-    st.sidebar.subheader("Uploaded Files")
+def sidebar_tab_uploaded_files_in_memory() -> None:
+    st.sidebar.subheader("Uploaded Files (In Memory)")
 
-    # ✅ Explicit refresh button
-    if st.sidebar.button("🔄 Refresh uploads"):
+    # Explicit refresh button for UX parity
+    if st.sidebar.button("🔄 Refresh view"):
         st.rerun()
 
-    uploads = list_uploads_for_problem(problem_id, limit=50)
-
-    if not uploads:
-        st.sidebar.caption("No uploads yet for this problem.")
+    uploaded_files = st.session_state.get("uploaded_files", {})
+    if not uploaded_files:
+        st.sidebar.caption("No uploads captured in this session yet.")
+        st.sidebar.caption("Note: In-memory uploads reset if Streamlit restarts.")
         return
 
-    options = []
-    for u in uploads:
-        badge = "✅" if u["readable"] else "⚠️"
-        options.append(
-            f'{badge} {u["created_utc"]} | part {u["part_id"]} | {u["filename"]} | {u["attempt_id"][:8]}'
-        )
+    # Flatten for display
+    flat = []
+    for attempt_id, parts in uploaded_files.items():
+        for part_id, info in parts.items():
+            flat.append((attempt_id, part_id, info))
+
+    # Sort newest first if possible
+    def _sort_key(item):
+        _attempt_id, _part_id, info = item
+        return info.get("uploaded_utc", "")
+    flat.sort(key=_sort_key, reverse=True)
+
+    options = [
+        f"{info.get('uploaded_utc','')} | attempt {attempt_id[:8]} | part {part_id} | {info.get('filename','')}"
+        for attempt_id, part_id, info in flat
+    ]
 
     pick = st.sidebar.selectbox("Select upload", list(range(len(options))), format_func=lambda i: options[i])
-    selected = uploads[pick]
+    attempt_id, part_id, info = flat[pick]
 
-    with st.sidebar.expander("Upload details", expanded=False):
-        st.write(f'**Attempt:** {selected["attempt_id"]}')
-        st.write(f'**Part:** {selected["part_id"]}')
-        st.write(f'**Filename:** {selected["filename"]}')
-        st.write(f'**Readable:** {selected["readable"]}')
-        st.write(f'**Extracted text length:** {selected["extracted_text_len"]}')
-        st.write(f'**Stored path:** {selected["stored_path"]}')
+    with st.sidebar.expander("Upload details", expanded=True):
+        st.write(f"**Attempt:** {attempt_id}")
+        st.write(f"**Part:** {part_id}")
+        st.write(f"**Filename:** {info['filename']}")
+        st.write(f"**Size:** {info['size']} bytes")
+        st.write(f"**SHA256:** `{info['sha256']}`")
+        st.write(f"**Uploaded (UTC):** {info['uploaded_utc']}")
 
-        path = Path(selected["stored_path"])
-        if path.exists():
-            st.download_button(
-                label="Download PDF",
-                data=path.read_bytes(),
-                file_name=selected["filename"],
-                mime="application/pdf",
-                key=f'dl_{selected["attempt_id"]}_{selected["part_id"]}_{selected["filename"]}'
-            )
-        else:
-            st.warning("File not found in current runtime storage (Streamlit may have restarted).")
-
-
-def sidebar_debug_panel(problem_id: str) -> None:
-    with st.sidebar.expander("🔧 Debug (Uploads)", expanded=False):
-        st.write("**DB file:**", str(DB_FILE))
-        st.write("**DB exists:**", DB_FILE.exists())
-        st.write("**Uploads table rows (total):**", debug_upload_count())
-        st.write("**Uploads dir:**", str(UPLOADS_DIR))
-        st.write("**Uploads dir exists:**", UPLOADS_DIR.exists())
-
-        rows = debug_last_upload_rows(limit=10)
-        if not rows:
-            st.caption("No upload rows found in DB.")
-            return
-
-        st.caption("Last 10 upload rows (most recent first):")
-        for r in rows:
-            _id, created, attempt_id, part_id, filename, stored_path, readable, text_len = r
-            exists = Path(stored_path).exists()
-            st.write(
-                f"#{_id} | {created} | attempt {str(attempt_id)[:8]} | part {part_id} | "
-                f"{filename} | readable={bool(readable)} | exists={exists}"
-            )
+        st.download_button(
+            label="⬇️ Download uploaded PDF",
+            data=info["bytes"],
+            file_name=info["filename"],
+            mime="application/pdf",
+            key=f"sidebar_dl_{attempt_id}_{part_id}",
+        )
 
 
 # -----------------------------
-# UI: Main problem
+# Main UI: Problem + Submission + Uploads
 # -----------------------------
-def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
+def render_problem(problem: Dict[str, Any], assignment: str,
+                   answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     pid = problem.get("problem_id", "")
     title = problem.get("title", pid)
     statement = problem.get("statement", "")
@@ -474,12 +433,17 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     for p in parts:
         part_id = str(p.get("part_id", "")).strip() or "?"
         prompt = p.get("prompt", "")
+        expected = p.get("expected_output", {}) or {}
+        units = expected.get("units", "")
 
         st.markdown(f"### Part ({part_id})")
         if prompt:
             st.write(prompt)
 
-        responses[part_id] = st.text_input("Answer", key=f"{pid}_{part_id}_answer")
+        label = "Answer"
+        if units:
+            label = f"Answer ({units})"
+        responses[part_id] = st.text_input(label, key=f"{pid}_{part_id}_answer")
 
     submitted = st.button("Submit", key=f"{pid}_submit")
     if not submitted:
@@ -508,40 +472,60 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
     if incorrect_parts:
         st.warning("Upload your work for the parts you missed (one PDF per part).")
-        render_per_part_uploads(attempt_id, incorrect_parts)
+        render_per_part_uploads_in_memory(attempt_id, incorrect_parts)
     else:
         st.info("All graded parts are correct. No uploads needed.")
 
 
-def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None:
+def render_per_part_uploads_in_memory(attempt_id: str, incorrect_parts: List[str]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
-    st.caption("Upload a PDF for each incorrect part. If it can't be read, complete the fallback form for that part.")
+    st.caption("Uploads are stored in-memory only for verification (no disk saving yet).")
 
     for part_id in incorrect_parts:
         st.markdown(f"### Part ({part_id}) — Upload")
-        state_key = upload_state_key(attempt_id, part_id)
 
-        if st.session_state.get(state_key) is True:
-            st.success("✅ Upload successful. Your work has been saved.")
+        existing = get_upload_from_memory(attempt_id, part_id)
+        if existing is not None:
+            st.success("✅ Upload received (stored in memory).")
+            st.write(f"**File:** {existing['filename']}")
+            st.write(f"**Size:** {existing['size']} bytes")
+            st.write(f"**SHA256:** `{existing['sha256']}`")
+            st.write(f"**Uploaded (UTC):** {existing['uploaded_utc']}")
+
+            st.download_button(
+                label="⬇️ Download the uploaded PDF (proof)",
+                data=existing["bytes"],
+                file_name=existing["filename"],
+                mime="application/pdf",
+                key=f"dl_mem_{attempt_id}_{part_id}",
+            )
+
+            if st.button("Replace upload", key=f"replace_{attempt_id}_{part_id}"):
+                st.session_state["uploaded_files"].setdefault(attempt_id, {})
+                st.session_state["uploaded_files"][attempt_id].pop(part_id, None)
+                st.session_state.pop(upload_state_key(attempt_id, part_id), None)
+                st.rerun()
         else:
             uploaded = st.file_uploader(
                 f"Upload PDF for Part ({part_id})",
                 type=["pdf"],
-                key=f"{attempt_id}_{part_id}_pdf"
+                key=f"uploader_{attempt_id}_{part_id}",
             )
             if uploaded is not None:
-                readable, _extracted_len, stored_path = save_upload(attempt_id, part_id, uploaded)
-                st.session_state[state_key] = True
+                info = store_upload_in_memory(attempt_id, part_id, uploaded)
+                st.success("✅ Upload received (stored in memory).")
+                st.write(f"**File:** {info['filename']}")
+                st.write(f"**Size:** {info['size']} bytes")
+                st.write(f"**SHA256:** `{info['sha256']}`")
 
-                st.success("✅ Upload successful. Your work has been saved.")
-                st.caption(f"Saved to: {stored_path}")
-
-                if not readable:
-                    st.warning(
-                        "⚠️ We could not confidently read this PDF. "
-                        "Please complete the fallback form below."
-                    )
+                st.download_button(
+                    label="⬇️ Download the uploaded PDF (proof)",
+                    data=info["bytes"],
+                    file_name=info["filename"],
+                    mime="application/pdf",
+                    key=f"dl_mem_{attempt_id}_{part_id}",
+                )
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
             balance = st.text_area(
@@ -562,17 +546,18 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 # -----------------------------
 # App entry
 # -----------------------------
-st.set_page_config(page_title="MEB Tutor (Instructor Demo)", layout="wide")
+st.set_page_config(page_title="MEB Tutor (Upload Verify)", layout="wide")
 init_session_state()
 
+# Ensure directories exist
 safe_mkdir(DATA_DIR)
 safe_mkdir(PROBLEMS_DIR)
-safe_mkdir(UPLOADS_DIR)
+safe_mkdir(RUNTIME_DIR)
 safe_mkdir(LOGS_DIR)
 db_init()
 
-st.title("MEB Homework Tutor — Instructor Demo")
-st.caption("Uploads are saved to disk + logged to SQLite; sidebar shows Attempt History + Uploaded Files.")
+st.title("MEB Homework Tutor — Upload Verification (No AI Yet)")
+st.caption("Uploads are stored in memory only and verified via checksum + download button.")
 
 # Load assignments
 try:
@@ -591,10 +576,7 @@ tab1, tab2 = st.sidebar.tabs(["Attempt history", "Uploaded files"])
 with tab1:
     sidebar_tab_attempt_history(problem_id)
 with tab2:
-    sidebar_tab_uploaded_files(problem_id)
-
-# Always show debug panel (collapse by default)
-sidebar_debug_panel(problem_id)
+    sidebar_tab_uploaded_files_in_memory()
 
 # Load selected problem
 try:
