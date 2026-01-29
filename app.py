@@ -1,16 +1,16 @@
 # app.py
-# MEB Homework Tutor — Instructor Demo (Cloud-friendly)
+# MEB Homework Tutor — Streamlit Cloud stable upload UX (NO AI YET)
 #
-# Current focus (per your request):
-# ✅ Numeric answer entry per part + tolerance grading from CSV
-# ✅ Attempt logging (SQLite in /tmp)
-# ✅ Per-part PDF upload AFTER incorrect submission
-# ✅ Upload verification WITHOUT saving to disk:
-#    - Store PDF bytes in-memory (st.session_state)
-#    - Show persistent "Upload received" panel with filename, size, SHA256
-#    - Provide a download button as proof the upload is captured
+# Goal (per your request):
+# ✅ Students submit numeric answers (graded via CSV tolerance)
+# ✅ If incorrect, they can upload a PDF PER PART
+# ✅ Upload does NOT "disappear" after upload (Streamlit rerun-safe)
+# ✅ Verify upload worked: persistent success panel + filename/size/SHA256 + download button
+# ✅ Sidebar shows uploaded files captured in this session
 #
-# NOTE: No AI yet. Upload exists only to verify capture for later AI processing.
+# Key fix vs your current behavior:
+# ✅ Persist the "active attempt" (attempt_id + incorrect parts) in st.session_state
+# so the upload UI keeps rendering after Streamlit reruns.
 
 import csv
 import json
@@ -23,16 +23,8 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import streamlit as st
 
-# Optional typed-PDF extraction (not required for upload verification)
-try:
-    import PyPDF2  # type: ignore
-    HAS_PYPDF2 = True
-except Exception:
-    HAS_PYPDF2 = False
-
-
 # -----------------------------
-# Paths (repo vs runtime)
+# Paths
 # -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -42,7 +34,7 @@ PROBLEMS_DIR = DATA_DIR / "problems"
 ASSIGNMENTS_FILE = DATA_DIR / "assignments.json"
 ANSWER_KEY_FILE = DATA_DIR / "answer_key.csv"
 
-# Runtime data (writable on Streamlit Community Cloud)
+# Runtime data (writable on Streamlit Cloud)
 RUNTIME_DIR = Path("/tmp/cheme_tutor_runtime")
 LOGS_DIR = RUNTIME_DIR / "logs"
 DB_FILE = LOGS_DIR / "attempts.sqlite3"
@@ -73,22 +65,18 @@ def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_v
     return abs(student_val - answer_val) <= tol_value
 
 
-def upload_state_key(attempt_id: str, part_id: str) -> str:
-    return f"uploaded_{attempt_id}_{part_id}"
-
-
 def _sha256(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
+
+
+def upload_state_key(attempt_id: str, part_id: str) -> str:
+    return f"uploaded_{attempt_id}_{part_id}"
 
 
 # -----------------------------
 # In-memory upload store (proof of upload)
 # -----------------------------
 def store_upload_in_memory(attempt_id: str, part_id: str, uploaded_file) -> Dict[str, Any]:
-    """
-    Stores PDF bytes in Streamlit session_state. No disk storage.
-    This is the simplest "verify upload" approach on Streamlit Cloud.
-    """
     file_bytes = uploaded_file.getvalue()
     info = {
         "filename": uploaded_file.name,
@@ -207,17 +195,6 @@ def db_init() -> None:
                 FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id) ON DELETE CASCADE
             );
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS fallback (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                attempt_id TEXT NOT NULL,
-                part_id TEXT NOT NULL,
-                balance_equations TEXT,
-                notes TEXT,
-                created_utc TEXT NOT NULL,
-                FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id) ON DELETE CASCADE
-            );
-        """)
         conn.commit()
 
 
@@ -265,45 +242,23 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
         return list(cur.fetchall())
 
 
-def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: str) -> None:
-    with db_connect() as conn:
-        conn.execute("""
-            INSERT INTO fallback (attempt_id, part_id, balance_equations, notes, created_utc)
-            VALUES (?, ?, ?, ?, ?)
-        """, (attempt_id, part_id, balance_equations, notes, utc_now_iso()))
-        conn.commit()
-
-
-# -----------------------------
-# Optional: PDF text extraction helper (not used yet for AI)
-# -----------------------------
-def try_extract_pdf_text(pdf_bytes: bytes) -> str:
-    if not HAS_PYPDF2:
-        return ""
-    try:
-        # PyPDF2 can accept a file-like object. We'll wrap bytes.
-        from io import BytesIO
-        reader = PyPDF2.PdfReader(BytesIO(pdf_bytes))  # type: ignore
-        chunks = []
-        for page in reader.pages:
-            chunks.append(page.extract_text() or "")
-        return "\n".join(chunks).strip()
-    except Exception:
-        return ""
-
-
 # -----------------------------
 # Session state
 # -----------------------------
 def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
-    st.session_state.setdefault("last_attempt_id", None)
-    st.session_state.setdefault("uploaded_files", {})  # attempt_id -> part_id -> info dict
+
+    # Captured uploads for this session: uploaded_files[attempt_id][part_id] = info
+    st.session_state.setdefault("uploaded_files", {})
+
+    # ✅ Persist the attempt context so upload UI survives reruns
+    # active_attempt = {attempt_id, problem_id, assignment, incorrect_parts, results}
+    st.session_state.setdefault("active_attempt", None)
 
 
 # -----------------------------
-# Sidebar: Navigation + Tabs
+# Sidebar UI
 # -----------------------------
 def render_sidebar(assignments: dict) -> None:
     st.sidebar.title("Navigation")
@@ -359,9 +314,8 @@ def sidebar_tab_attempt_history(problem_id: str) -> None:
 
 
 def sidebar_tab_uploaded_files_in_memory() -> None:
-    st.sidebar.subheader("Uploaded Files (In Memory)")
+    st.sidebar.subheader("Uploaded Files (This Session)")
 
-    # Explicit refresh button for UX parity
     if st.sidebar.button("🔄 Refresh view"):
         st.rerun()
 
@@ -371,17 +325,12 @@ def sidebar_tab_uploaded_files_in_memory() -> None:
         st.sidebar.caption("Note: In-memory uploads reset if Streamlit restarts.")
         return
 
-    # Flatten for display
     flat = []
     for attempt_id, parts in uploaded_files.items():
         for part_id, info in parts.items():
             flat.append((attempt_id, part_id, info))
 
-    # Sort newest first if possible
-    def _sort_key(item):
-        _attempt_id, _part_id, info = item
-        return info.get("uploaded_utc", "")
-    flat.sort(key=_sort_key, reverse=True)
+    flat.sort(key=lambda t: t[2].get("uploaded_utc", ""), reverse=True)
 
     options = [
         f"{info.get('uploaded_utc','')} | attempt {attempt_id[:8]} | part {part_id} | {info.get('filename','')}"
@@ -409,8 +358,63 @@ def sidebar_tab_uploaded_files_in_memory() -> None:
 
 
 # -----------------------------
-# Main UI: Problem + Submission + Uploads
+# Main UI
 # -----------------------------
+def render_per_part_uploads_in_memory(attempt_id: str, incorrect_parts: List[str]) -> None:
+    st.divider()
+    st.subheader("Upload Work (Per Part)")
+    st.caption("Uploads are stored in memory only for verification (no disk storage yet).")
+
+    for part_id in incorrect_parts:
+        st.markdown(f"### Part ({part_id}) — Upload")
+
+        existing = get_upload_from_memory(attempt_id, part_id)
+        if existing is not None:
+            st.success("✅ Upload received (stored in memory).")
+            st.write(f"**File:** {existing['filename']}")
+            st.write(f"**Size:** {existing['size']} bytes")
+            st.write(f"**SHA256:** `{existing['sha256']}`")
+            st.write(f"**Uploaded (UTC):** {existing['uploaded_utc']}")
+
+            st.download_button(
+                label="⬇️ Download the uploaded PDF (proof)",
+                data=existing["bytes"],
+                file_name=existing["filename"],
+                mime="application/pdf",
+                key=f"dl_mem_{attempt_id}_{part_id}",
+            )
+
+            if st.button("Replace upload", key=f"replace_{attempt_id}_{part_id}"):
+                st.session_state["uploaded_files"].setdefault(attempt_id, {})
+                st.session_state["uploaded_files"][attempt_id].pop(part_id, None)
+                st.session_state.pop(upload_state_key(attempt_id, part_id), None)
+                st.rerun()
+        else:
+            # IMPORTANT: file_uploader triggers a rerun when a file is chosen;
+            # our active_attempt persistence ensures this UI stays visible.
+            uploaded = st.file_uploader(
+                f"Upload PDF for Part ({part_id})",
+                type=["pdf"],
+                key=f"uploader_{attempt_id}_{part_id}",
+            )
+            if uploaded is not None:
+                info = store_upload_in_memory(attempt_id, part_id, uploaded)
+
+                # Immediate proof panel
+                st.success("✅ Upload received (stored in memory).")
+                st.write(f"**File:** {info['filename']}")
+                st.write(f"**Size:** {info['size']} bytes")
+                st.write(f"**SHA256:** `{info['sha256']}`")
+
+                st.download_button(
+                    label="⬇️ Download the uploaded PDF (proof)",
+                    data=info["bytes"],
+                    file_name=info["filename"],
+                    mime="application/pdf",
+                    key=f"dl_mem_{attempt_id}_{part_id}",
+                )
+
+
 def render_problem(problem: Dict[str, Any], assignment: str,
                    answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     pid = problem.get("problem_id", "")
@@ -446,120 +450,68 @@ def render_problem(problem: Dict[str, Any], assignment: str,
         responses[part_id] = st.text_input(label, key=f"{pid}_{part_id}_answer")
 
     submitted = st.button("Submit", key=f"{pid}_submit")
-    if not submitted:
-        return
 
-    attempt_id = log_attempt(assignment, pid)
-    st.session_state["last_attempt_id"] = attempt_id
+    if submitted:
+        attempt_id = log_attempt(assignment, pid)
+        st.success(f"Submission logged. Attempt ID: {attempt_id[:8]}")
+        st.subheader("Results")
 
-    st.success(f"Submission logged. Attempt ID: {attempt_id[:8]}")
-    st.subheader("Results")
+        results: Dict[str, Tuple[Optional[bool], str]] = {}
+        for p in parts:
+            part_id = str(p.get("part_id", "")).strip() or "?"
+            is_correct, msg = grade_part(pid, part_id, responses.get(part_id, ""), answer_key)
+            results[part_id] = (is_correct, msg)
+            log_attempt_part(attempt_id, part_id, responses.get(part_id, ""), is_correct, msg)
 
-    results: Dict[str, Tuple[Optional[bool], str]] = {}
-    for p in parts:
-        part_id = str(p.get("part_id", "")).strip() or "?"
-        is_correct, msg = grade_part(pid, part_id, responses.get(part_id, ""), answer_key)
-        results[part_id] = (is_correct, msg)
-        log_attempt_part(attempt_id, part_id, responses.get(part_id, ""), is_correct, msg)
+            if is_correct is None:
+                st.info(f"Part ({part_id}): {msg}")
+            elif is_correct:
+                st.success(f"Part ({part_id}): {msg}")
+            else:
+                st.error(f"Part ({part_id}): {msg}")
 
-        if is_correct is None:
-            st.info(f"Part ({part_id}): {msg}")
-        elif is_correct:
-            st.success(f"Part ({part_id}): {msg}")
+        incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
+
+        # ✅ Persist attempt context so upload UI survives reruns
+        st.session_state["active_attempt"] = {
+            "attempt_id": attempt_id,
+            "problem_id": pid,
+            "assignment": assignment,
+            "incorrect_parts": incorrect_parts,
+            "results": {k: [v[0], v[1]] for k, v in results.items()},
+        }
+
+        if incorrect_parts:
+            st.warning("Upload your work for the parts you missed (one PDF per part).")
+            render_per_part_uploads_in_memory(attempt_id, incorrect_parts)
         else:
-            st.error(f"Part ({part_id}): {msg}")
+            st.info("All graded parts are correct. No uploads needed.")
 
-    incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
-    if incorrect_parts:
-        st.warning("Upload your work for the parts you missed (one PDF per part).")
-        render_per_part_uploads_in_memory(attempt_id, incorrect_parts)
-    else:
-        st.info("All graded parts are correct. No uploads needed.")
-
-
-def render_per_part_uploads_in_memory(attempt_id: str, incorrect_parts: List[str]) -> None:
-    st.divider()
-    st.subheader("Upload Work (Per Part)")
-    st.caption("Uploads are stored in-memory only for verification (no disk saving yet).")
-
-    for part_id in incorrect_parts:
-        st.markdown(f"### Part ({part_id}) — Upload")
-
-        existing = get_upload_from_memory(attempt_id, part_id)
-        if existing is not None:
-            st.success("✅ Upload received (stored in memory).")
-            st.write(f"**File:** {existing['filename']}")
-            st.write(f"**Size:** {existing['size']} bytes")
-            st.write(f"**SHA256:** `{existing['sha256']}`")
-            st.write(f"**Uploaded (UTC):** {existing['uploaded_utc']}")
-
-            st.download_button(
-                label="⬇️ Download the uploaded PDF (proof)",
-                data=existing["bytes"],
-                file_name=existing["filename"],
-                mime="application/pdf",
-                key=f"dl_mem_{attempt_id}_{part_id}",
-            )
-
-            if st.button("Replace upload", key=f"replace_{attempt_id}_{part_id}"):
-                st.session_state["uploaded_files"].setdefault(attempt_id, {})
-                st.session_state["uploaded_files"][attempt_id].pop(part_id, None)
-                st.session_state.pop(upload_state_key(attempt_id, part_id), None)
-                st.rerun()
-        else:
-            uploaded = st.file_uploader(
-                f"Upload PDF for Part ({part_id})",
-                type=["pdf"],
-                key=f"uploader_{attempt_id}_{part_id}",
-            )
-            if uploaded is not None:
-                info = store_upload_in_memory(attempt_id, part_id, uploaded)
-                st.success("✅ Upload received (stored in memory).")
-                st.write(f"**File:** {info['filename']}")
-                st.write(f"**Size:** {info['size']} bytes")
-                st.write(f"**SHA256:** `{info['sha256']}`")
-
-                st.download_button(
-                    label="⬇️ Download the uploaded PDF (proof)",
-                    data=info["bytes"],
-                    file_name=info["filename"],
-                    mime="application/pdf",
-                    key=f"dl_mem_{attempt_id}_{part_id}",
-                )
-
-        with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
-            balance = st.text_area(
-                "Paste the balance(s)/equation(s) you used (text)",
-                height=120,
-                key=f"{attempt_id}_{part_id}_fallback_balance"
-            )
-            notes = st.text_area(
-                "Notes (what you tried / where you think the mistake is)",
-                height=100,
-                key=f"{attempt_id}_{part_id}_fallback_notes"
-            )
-            if st.button("Save fallback info", key=f"{attempt_id}_{part_id}_save_fallback"):
-                save_fallback(attempt_id, part_id, balance, notes)
-                st.success("✅ Additional information saved.")
+    # ✅ On rerun (e.g., after file upload), keep showing upload UI for the active attempt
+    active = st.session_state.get("active_attempt")
+    if active and active.get("problem_id") == pid:
+        attempt_id_active = active.get("attempt_id")
+        incorrect_parts_active = active.get("incorrect_parts", [])
+        if attempt_id_active and incorrect_parts_active:
+            st.warning("Continue uploading your work for the parts you missed (attempt persists across reruns).")
+            render_per_part_uploads_in_memory(attempt_id_active, incorrect_parts_active)
 
 
 # -----------------------------
 # App entry
 # -----------------------------
-st.set_page_config(page_title="MEB Tutor (Upload Verify)", layout="wide")
+st.set_page_config(page_title="MEB Tutor (Stable Uploads)", layout="wide")
 init_session_state()
 
-# Ensure directories exist
 safe_mkdir(DATA_DIR)
 safe_mkdir(PROBLEMS_DIR)
 safe_mkdir(RUNTIME_DIR)
 safe_mkdir(LOGS_DIR)
 db_init()
 
-st.title("MEB Homework Tutor — Upload Verification (No AI Yet)")
-st.caption("Uploads are stored in memory only and verified via checksum + download button.")
+st.title("MEB Homework Tutor — Stable Uploads (Streamlit Cloud)")
+st.caption("Upload boxes persist after upload reruns. Uploads stored in-memory for verification only.")
 
-# Load assignments
 try:
     assignments = load_assignments()
 except Exception as e:
@@ -571,21 +523,18 @@ render_sidebar(assignments)
 assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
-# Sidebar tabs
 tab1, tab2 = st.sidebar.tabs(["Attempt history", "Uploaded files"])
 with tab1:
     sidebar_tab_attempt_history(problem_id)
 with tab2:
     sidebar_tab_uploaded_files_in_memory()
 
-# Load selected problem
 try:
     problem = load_problem(problem_id)
 except Exception as e:
     st.error(f"Could not load problem '{problem_id}'.\n\nError: {e}")
     st.stop()
 
-# Load answer key
 try:
     answer_key = load_answer_key()
 except Exception as e:
