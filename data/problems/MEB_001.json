@@ -1,7 +1,7 @@
 {
   "problem_id": "MEB_001",
   "title": "Flash Tank Material Balance with Raoult's Law",
-  "statement": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank. The feed flow rate is 100 kmol/hr with composition z_B = 0.50 and z_T = 0.50. The flash tank operates at 95[...]",
+  "statement": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank. The feed flow rate is 100 kmol/hr with composition z_B = 0.50 and z_T = 0.50. The flash tank operates at 95 C and 1 atm. The measured vapor outlet compositions are y_B = 0.7 and y_T = 0.3. The vapor pressure of Benzene at 95 C is P_B^Sat = 1.55 atm. Assume ideal gas conditions and Raoult's law, y_i P = x_i P_i^sat",
   "parts": [
     {
       "part_id": "a",
