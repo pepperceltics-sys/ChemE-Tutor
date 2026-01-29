@@ -30,7 +30,7 @@
         "name": "x_T",
         "units": "mole fraction"
         }
-      ],
+        ],
     "notes": "Students should use overall and component material balances with Raoult\u2019s law to close the system."
   }
 }
