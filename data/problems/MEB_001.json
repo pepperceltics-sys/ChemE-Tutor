@@ -16,7 +16,7 @@
       ]
     },
     {
-      "part_id": "b1",
+      "part_id": "b",
       "prompt": "Solve for the vapor flow rate V.",
       "input_type": "numeric",
       "expected_output": [
@@ -27,7 +27,7 @@
       ]
     },
     {
-      "part_id": "b2",
+      "part_id": "c",
       "prompt": "Solve for the liquid flow rate L.",
       "input_type": "numeric",
       "expected_output": [
@@ -38,7 +38,7 @@
       ]
     },
     {
-      "part_id": "b3",
+      "part_id": "d",
       "prompt": "Solve for the liquid phase composition x_B.",
       "input_type": "numeric",
       "expected_output": [
@@ -49,7 +49,7 @@
       ]
     },
     {
-      "part_id": "b4",
+      "part_id": "e",
       "prompt": "Solve for the liquid phase composition x_T.",
       "input_type": "numeric",
       "expected_output": [
