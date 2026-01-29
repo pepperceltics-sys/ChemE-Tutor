@@ -7,27 +7,22 @@
       "part_id": "a",
       "prompt": "Perform a degrees of freedom analysis and give the number of unknown variables and Equations.",
       "input_type": "numeric",
-      "expected_outputs": {"name": "Unknowns"}
+      "expected_output": {"name": "Unknowns"}
         },
+    {
       "part_id": "b",
       "prompt": "Solve for the vapor flow rate V, liquid flow rate L, and the liquid phase compositions x_B and x_T.",
       "input_type": "numeric",
-      "expected_outputs": 
-        {
-        "name": "V",
-        "units": "kmol/hr",
-      
-        "name": "L",
-        "units": "kmol/hr"
-      },
-      {
-        "name": "x_B",
-        "units": "mole fraction"
+      "expected_output": 
+        {"name": "V","units": "kmol/hr",
+        "name": "L","units": "kmol/hr"}
+      {"name": "x_B","units": "mole fraction"}
       {
         "name": "x_T",
         "units": "mole fraction"
         }
-     ],
+    }
+  ],
     "notes": "Students should use overall and component material balances with Raoult\u2019s law to close the system."
   }
 }
