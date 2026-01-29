@@ -1,30 +1,13 @@
 # app.py
-# Instructor-demo-ready build (per-part uploads + persistent "upload successful" message):
+# Instructor-demo-ready build:
 # - Assignment -> Problem navigation
 # - Numeric answer entry per part
 # - CSV grading with tolerance
 # - Attempt logging (SQLite)
 # - Upload workflow PER PART (PDF) shown only when that part is incorrect
 # - Persistent "✅ Upload successful..." message per part (survives Streamlit reruns)
-# - Fallback form PER PART if PDF can't be read (or if student prefers)
-#
-# File structure:
-# meb_tutor_app/
-#   app.py
-#   data/
-#     assignments.json
-#     answer_key.csv
-#     problems/
-#       MEB_001.json
-#       MEB_002.json
-#     uploads/
-#       .gitkeep
-#     logs/
-#       .gitkeep
-#
-# Run locally:
-#   pip install streamlit
-#   streamlit run app.py
+# - Fallback form PER PART
+# - Sidebar tabs: Attempt History + Uploaded Files (instructor-friendly)
 
 import csv
 import json
@@ -83,10 +66,7 @@ def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_v
 
 
 def upload_state_key(attempt_id: str, part_id: str) -> str:
-    """
-    Session-state key that tracks whether a PDF upload succeeded
-    for (attempt_id, part_id), so we can show a persistent confirmation.
-    """
+    """Session-state key to remember upload succeeded for (attempt_id, part_id)."""
     return f"uploaded_{attempt_id}_{part_id}"
 
 
@@ -262,6 +242,36 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
         return list(cur.fetchall())
 
 
+def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Returns uploads joined with attempts for the selected problem.
+    Each dict includes: created_utc, attempt_id, part_id, filename, stored_path, readable, extracted_text_len
+    """
+    with db_connect() as conn:
+        cur = conn.execute("""
+            SELECT u.created_utc, u.attempt_id, u.part_id, u.filename, u.stored_path, u.readable, u.extracted_text_len
+            FROM uploads u
+            JOIN attempts a ON a.attempt_id = u.attempt_id
+            WHERE a.problem_id = ?
+            ORDER BY u.created_utc DESC
+            LIMIT ?
+        """, (problem_id, limit))
+        rows = cur.fetchall()
+
+    out: List[Dict[str, Any]] = []
+    for created_utc, attempt_id, part_id, filename, stored_path, readable, extracted_len in rows:
+        out.append({
+            "created_utc": created_utc,
+            "attempt_id": attempt_id,
+            "part_id": part_id,
+            "filename": filename,
+            "stored_path": stored_path,
+            "readable": bool(readable),
+            "extracted_text_len": int(extracted_len),
+        })
+    return out
+
+
 # -----------------------------
 # Uploads + readability
 # -----------------------------
@@ -326,7 +336,7 @@ def init_session_state() -> None:
 
 
 # -----------------------------
-# UI: Sidebar navigation
+# Sidebar: Navigation + Tabs
 # -----------------------------
 def render_sidebar(assignments: dict) -> None:
     st.sidebar.title("Navigation")
@@ -354,7 +364,7 @@ def render_sidebar(assignments: dict) -> None:
     st.sidebar.divider()
 
 
-def render_attempt_history(problem_id: str) -> None:
+def sidebar_tab_attempt_history(problem_id: str) -> None:
     st.sidebar.subheader("Recent Attempts")
     rows = list_attempts_for_problem(problem_id, limit=8)
     if not rows:
@@ -367,8 +377,9 @@ def render_attempt_history(problem_id: str) -> None:
         labels.append(f"{created_utc} ({attempt_id[:8]})")
         ids.append(attempt_id)
 
-    idx = st.sidebar.selectbox("View", list(range(len(labels))), format_func=lambda i: labels[i])
+    idx = st.sidebar.selectbox("View attempt", list(range(len(labels))), format_func=lambda i: labels[i])
     attempt_id = ids[idx]
+
     with st.sidebar.expander("Attempt details", expanded=False):
         parts = get_attempt_parts(attempt_id)
         for part_id, ans, is_corr, _msg in parts:
@@ -379,6 +390,45 @@ def render_attempt_history(problem_id: str) -> None:
             else:
                 st.write(f"Part ({part_id}): ❌ {ans}")
         st.caption(f"Attempt ID: {attempt_id}")
+
+
+def sidebar_tab_uploaded_files(problem_id: str) -> None:
+    st.sidebar.subheader("Uploaded Files")
+    uploads = list_uploads_for_problem(problem_id, limit=50)
+
+    if not uploads:
+        st.sidebar.caption("No uploads yet for this problem.")
+        return
+
+    options = []
+    for u in uploads:
+        badge = "✅" if u["readable"] else "⚠️"
+        options.append(f'{badge} {u["created_utc"]} | part {u["part_id"]} | {u["filename"]} | {u["attempt_id"][:8]}')
+
+    pick = st.sidebar.selectbox("Select upload", list(range(len(options))), format_func=lambda i: options[i])
+    selected = uploads[pick]
+
+    with st.sidebar.expander("Upload details", expanded=False):
+        st.write(f'**Attempt:** {selected["attempt_id"]}')
+        st.write(f'**Part:** {selected["part_id"]}')
+        st.write(f'**Filename:** {selected["filename"]}')
+        st.write(f'**Readable:** {selected["readable"]}')
+        st.write(f'**Extracted text length:** {selected["extracted_text_len"]}')
+        st.write(f'**Stored path:** {selected["stored_path"]}')
+
+        # Download button (if file exists)
+        path = Path(selected["stored_path"])
+        if path.exists():
+            data = path.read_bytes()
+            st.download_button(
+                label="Download PDF",
+                data=data,
+                file_name=selected["filename"],
+                mime="application/pdf",
+                key=f'dl_{selected["attempt_id"]}_{selected["part_id"]}_{selected["filename"]}'
+            )
+        else:
+            st.warning("File not found in current runtime storage (Streamlit may have restarted).")
 
 
 # -----------------------------
@@ -455,7 +505,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
 def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
-
     st.caption("Upload a PDF for each incorrect part. If it can't be read, complete the fallback form for that part.")
 
     for part_id in incorrect_parts:
@@ -479,7 +528,7 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
                 # ✅ Persist upload success so message survives reruns
                 st.session_state[state_key] = True
 
-                # ✅ Immediate feedback (even if reruns, the block above will still show it)
+                # ✅ Immediate feedback; persistent message will show on rerun
                 st.success("✅ Upload successful. Your work has been saved.")
 
                 if not readable:
@@ -508,7 +557,7 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 # -----------------------------
 # App entry
 # -----------------------------
-st.set_page_config(page_title="MEB Tutor (Per-Part Uploads)", layout="wide")
+st.set_page_config(page_title="MEB Tutor (Instructor Demo)", layout="wide")
 init_session_state()
 
 safe_mkdir(DATA_DIR)
@@ -517,8 +566,8 @@ safe_mkdir(UPLOADS_DIR)
 safe_mkdir(LOGS_DIR)
 db_init()
 
-st.title("MEB Homework Tutor — Instructor Demo (Per-Part Uploads)")
-st.caption("Per-part uploads now show a persistent '✅ Upload successful' message.")
+st.title("MEB Homework Tutor — Instructor Demo")
+st.caption("Now includes sidebar tabs for Attempt History and Uploaded Files.")
 
 # Load assignments
 try:
@@ -532,8 +581,12 @@ render_sidebar(assignments)
 assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
-# Sidebar attempt history
-render_attempt_history(problem_id)
+# Sidebar tabs: Attempt History + Uploaded Files
+tab1, tab2 = st.sidebar.tabs(["Attempt history", "Uploaded files"])
+with tab1:
+    sidebar_tab_attempt_history(problem_id)
+with tab2:
+    sidebar_tab_uploaded_files(problem_id)
 
 # Load selected problem
 try:
