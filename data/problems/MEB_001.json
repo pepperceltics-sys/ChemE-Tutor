@@ -7,10 +7,8 @@
       "part_id": "a",
       "prompt": "Perform a degrees of freedom analysis and give the number of unknown variables and Equations.",
       "input_type": "numeric",
-      "expected_outputs": 
-      {
-        "name": "Unknowns"
-      },
+      "expected_outputs": {"name": "Unknowns"}
+        },
       "part_id": "b",
       "prompt": "Solve for the vapor flow rate V, liquid flow rate L, and the liquid phase compositions x_B and x_T.",
       "input_type": "numeric",
@@ -25,7 +23,6 @@
       {
         "name": "x_B",
         "units": "mole fraction"
-      },
       {
         "name": "x_T",
         "units": "mole fraction"
