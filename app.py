@@ -8,7 +8,7 @@
 # - Persistent "✅ Upload successful..." message per part (survives Streamlit reruns)
 # - Fallback form PER PART
 # - Sidebar tabs: Attempt History + Uploaded Files
-# - ✅ After saving an upload, force ONE extra rerun so the Uploaded Files tab updates immediately
+# - ✅ Uploaded Files tab includes an explicit "🔄 Refresh uploads" button (Streamlit-safe)
 
 import csv
 import json
@@ -244,9 +244,6 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
 
 
 def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Dict[str, Any]]:
-    """
-    Returns uploads joined with attempts for selected problem.
-    """
     with db_connect() as conn:
         cur = conn.execute("""
             SELECT u.created_utc, u.attempt_id, u.part_id, u.filename, u.stored_path, u.readable, u.extracted_text_len
@@ -289,10 +286,6 @@ def try_extract_pdf_text(pdf_bytes: bytes) -> str:
 
 
 def save_upload(attempt_id: str, part_id: str, uploaded_file) -> Tuple[bool, int, str]:
-    """
-    Save PDF to: data/uploads/<attempt_id>/<part_id>/<filename>
-    Returns: (readable, extracted_text_len, stored_path)
-    """
     safe_mkdir(UPLOADS_DIR)
     part_dir = UPLOADS_DIR / attempt_id / part_id
     safe_mkdir(part_dir)
@@ -333,7 +326,6 @@ def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
     st.session_state.setdefault("last_attempt_id", None)
-    st.session_state.setdefault("force_sidebar_refresh", False)
 
 
 # -----------------------------
@@ -395,6 +387,11 @@ def sidebar_tab_attempt_history(problem_id: str) -> None:
 
 def sidebar_tab_uploaded_files(problem_id: str) -> None:
     st.sidebar.subheader("Uploaded Files")
+
+    # ✅ Explicit refresh button (Streamlit-safe, avoids timing/rerun ambiguity)
+    if st.sidebar.button("🔄 Refresh uploads"):
+        st.rerun()
+
     uploads = list_uploads_for_problem(problem_id, limit=50)
 
     if not uploads:
@@ -404,7 +401,9 @@ def sidebar_tab_uploaded_files(problem_id: str) -> None:
     options = []
     for u in uploads:
         badge = "✅" if u["readable"] else "⚠️"
-        options.append(f'{badge} {u["created_utc"]} | part {u["part_id"]} | {u["filename"]} | {u["attempt_id"][:8]}')
+        options.append(
+            f'{badge} {u["created_utc"]} | part {u["part_id"]} | {u["filename"]} | {u["attempt_id"][:8]}'
+        )
 
     pick = st.sidebar.selectbox("Select upload", list(range(len(options))), format_func=lambda i: options[i])
     selected = uploads[pick]
@@ -419,10 +418,9 @@ def sidebar_tab_uploaded_files(problem_id: str) -> None:
 
         path = Path(selected["stored_path"])
         if path.exists():
-            data = path.read_bytes()
             st.download_button(
                 label="Download PDF",
-                data=data,
+                data=path.read_bytes(),
                 file_name=selected["filename"],
                 mime="application/pdf",
                 key=f'dl_{selected["attempt_id"]}_{selected["part_id"]}_{selected["filename"]}'
@@ -507,10 +505,9 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 
     for part_id in incorrect_parts:
         st.markdown(f"### Part ({part_id}) — Upload")
-
         state_key = upload_state_key(attempt_id, part_id)
 
-        # ✅ Always show persistent success message if uploaded already
+        # ✅ Persistent confirmation so it doesn't flash/disappear
         if st.session_state.get(state_key) is True:
             st.success("✅ Upload successful. Your work has been saved.")
         else:
@@ -519,11 +516,8 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
                 type=["pdf"],
                 key=f"{attempt_id}_{part_id}_pdf"
             )
-
             if uploaded is not None:
                 readable, _extracted_len, _stored_path = save_upload(attempt_id, part_id, uploaded)
-
-                # ✅ Persist upload success so message survives reruns
                 st.session_state[state_key] = True
                 st.success("✅ Upload successful. Your work has been saved.")
 
@@ -533,12 +527,6 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
                         "Please complete the fallback form below."
                     )
 
-                # ✅ Force ONE extra rerun so the sidebar 'Uploaded files' tab updates immediately
-                if not st.session_state.get("force_sidebar_refresh", False):
-                    st.session_state["force_sidebar_refresh"] = True
-                    st.rerun()
-
-        # Fallback form (always accessible)
         with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
             balance = st.text_area(
                 "Paste the balance(s)/equation(s) you used (text)",
@@ -561,9 +549,6 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 st.set_page_config(page_title="MEB Tutor (Instructor Demo)", layout="wide")
 init_session_state()
 
-# reset each run so the "one rerun" behavior can happen on next upload
-st.session_state["force_sidebar_refresh"] = False
-
 safe_mkdir(DATA_DIR)
 safe_mkdir(PROBLEMS_DIR)
 safe_mkdir(UPLOADS_DIR)
@@ -571,7 +556,7 @@ safe_mkdir(LOGS_DIR)
 db_init()
 
 st.title("MEB Homework Tutor — Instructor Demo")
-st.caption("Now includes sidebar tabs for Attempt History and Uploaded Files, with instant upload refresh.")
+st.caption("Sidebar tabs include Attempt History + Uploaded Files (with a Refresh button).")
 
 # Load assignments
 try:
