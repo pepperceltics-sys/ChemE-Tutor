@@ -14,10 +14,10 @@
       "part_id": "b",
       "prompt": "Solve for the vapor flow rate V, liquid flow rate L, and the liquid phase compositions x_B and x_T.",
       "input_type": "numeric",
-      "expected_outputs":
+      "expected_outputs": [
+        {
         "name": "V",
         "units": "kmol/hr"
-      },
       {
         "name": "L",
         "units": "kmol/hr"
