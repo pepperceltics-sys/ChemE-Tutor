@@ -17,8 +17,8 @@
       "expected_outputs": 
         {
         "name": "V",
-        "units": "kmol/hr"
-      {
+        "units": "kmol/hr",
+      
         "name": "L",
         "units": "kmol/hr"
       },
