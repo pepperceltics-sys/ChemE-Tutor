@@ -1,13 +1,20 @@
 {
   "problem_id": "MEB_002",
   "title": "Flash Tank Material Balance (Binary Mixture)",
-  "statement": "A well-mixed flash tank receives a steady feed stream of a binary mixture (A and B). The feed flow rate is F = 100 mol/min with overall composition z_A = 0.40 (and z_B = 0.60). Inside the flash tank, the mixture partially vaporizes and exits as two steady streams: a vapor stream V and a liquid stream L. The vapor stream composition is y_A = 0.70 (and y_B = 0.30), and the liquid stream composition is x_A = 0.20 (and x_B = 0.80).\n\nAssume steady state and no reaction.\n\n(a) Write the overall molar balance and the component A balance for the flash tank.\n(b) Solve for the vapor flow rate V and liquid flow rate L.\n(c) Verify that your results satisfy both the overall and component balances.",
-  "inputs_expected": {
-    "answer_type": "numeric",
-    "expected_outputs": [
-      { "name": "V", "units": "mol/min" },
-      { "name": "L", "units": "mol/min" }
-    ],
-    "notes": "Students should use overall and component material balances; no equilibrium calculations are required."
-  }
+  "statement": "A well-mixed flash tank receives a steady feed stream of a binary mixture (A and B). The feed flow rate is F = 100 mol/min with overall composition z_A = 0.40 (and z_B = 0.60). Inside the flash tank, the mixture partially vaporizes and exits as two steady streams: a vapor stream V and a liquid stream L. The vapor stream composition is y_A = 0.70 (and y_B = 0.30), and the liquid stream composition is x_A = 0.20 (and x_B = 0.80).\n\nAssume steady state and no reaction.",
+  "parts": [
+    {
+      "part_id": "a",
+      "prompt": "Solve for the vapor flow rate V.",
+      "input_type": "numeric",
+      "expected_output": { "name": "V", "units": "mol/min" }
+    },
+    {
+      "part_id": "b",
+      "prompt": "Solve for the molar flow rate of component B in the liquid outlet stream (i.e., L × x_B).",
+      "input_type": "numeric",
+      "expected_output": { "name": "B_in_liquid", "units": "mol/min" }
+    }
+  ]
 }
+
