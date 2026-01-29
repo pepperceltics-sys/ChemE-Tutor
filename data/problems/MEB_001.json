@@ -1,7 +1,7 @@
 {
   "problem_id": "MEB_001",
   "title": "Flash Tank Material Balance with Raoult's Law",
-  "statement": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank. The feed flow rate is 100 kmol/hr with composition z_B = 0.50 and z_T = 0.50. The flash tank operates at 95 °C and 1 atm. Use Raoult's law and appropriate material balances to determine the vapor and liquid flow rates and phase compositions.",
+  "statement": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank. The feed flow rate is 100 kmol/hr with composition z_B = 0.50 and z_T = 0.50. The flash tank operates at 95[...]",
   "parts": [
     {
       "part_id": "a",
@@ -10,28 +10,49 @@
       "expected_output": [
         {
           "name": "Unknowns",
-          "type": "integer"
+          "type": "integer",
           "units": ""
         }
       ]
     },
     {
-      "part_id": "b",
-      "prompt": "Solve for the vapor flow rate V, liquid flow rate L, and the liquid phase compositions x_B and x_T.",
+      "part_id": "b1",
+      "prompt": "Solve for the vapor flow rate V.",
       "input_type": "numeric",
       "expected_output": [
         {
           "name": "V",
           "units": "kmol/hr"
-        },
+        }
+      ]
+    },
+    {
+      "part_id": "b2",
+      "prompt": "Solve for the liquid flow rate L.",
+      "input_type": "numeric",
+      "expected_output": [
         {
           "name": "L",
           "units": "kmol/hr"
-        },
+        }
+      ]
+    },
+    {
+      "part_id": "b3",
+      "prompt": "Solve for the liquid phase composition x_B.",
+      "input_type": "numeric",
+      "expected_output": [
         {
           "name": "x_B",
           "units": "mole fraction"
-        },
+        }
+      ]
+    },
+    {
+      "part_id": "b4",
+      "prompt": "Solve for the liquid phase composition x_T.",
+      "input_type": "numeric",
+      "expected_output": [
         {
           "name": "x_T",
           "units": "mole fraction"
@@ -39,5 +60,7 @@
       ]
     }
   ],
+  "notes": "Students should use overall and component material balances with Raoult's law to close the system."
+}
   "notes": "Students should use overall and component material balances with Raoult's law to close the system."
 }
