@@ -1,15 +1,3 @@
-# app.py
-# Instructor-demo-ready build:
-# - Assignment -> Problem navigation
-# - Numeric answer entry per part
-# - CSV grading with tolerance
-# - Attempt logging (SQLite)
-# - Upload workflow PER PART (PDF) shown only when that part is incorrect
-# - Persistent "✅ Upload successful..." message per part (survives Streamlit reruns)
-# - Fallback form PER PART
-# - Sidebar tabs: Attempt History + Uploaded Files
-# - ✅ Uploaded Files tab includes an explicit "🔄 Refresh uploads" button (Streamlit-safe)
-
 import csv
 import json
 import sqlite3
@@ -67,7 +55,6 @@ def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_v
 
 
 def upload_state_key(attempt_id: str, part_id: str) -> str:
-    """Session-state key to remember upload succeeded for (attempt_id, part_id)."""
     return f"uploaded_{attempt_id}_{part_id}"
 
 
@@ -91,10 +78,6 @@ def load_problem(problem_id: str) -> dict:
 
 @st.cache_data
 def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
-    """
-    CSV columns required:
-      problem_id, part_id, answer_value, answer_units, tolerance_type, tolerance_value
-    """
     key: Dict[Tuple[str, str], Dict[str, str]] = {}
     if not ANSWER_KEY_FILE.exists():
         return key
@@ -106,14 +89,12 @@ def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
             raise ValueError(
                 f"{ANSWER_KEY_FILE} must include columns: {', '.join(sorted(required))}"
             )
-
         for row in reader:
             pid = (row.get("problem_id") or "").strip()
             part_id = (row.get("part_id") or "").strip()
             if not pid or not part_id:
                 continue
             key[(pid, part_id)] = {k: (v or "").strip() for k, v in row.items()}
-
     return key
 
 
@@ -269,6 +250,23 @@ def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Dict[str,
     return out
 
 
+def debug_last_upload_rows(limit: int = 10) -> List[Tuple[Any, ...]]:
+    with db_connect() as conn:
+        cur = conn.execute("""
+            SELECT id, created_utc, attempt_id, part_id, filename, stored_path, readable, extracted_text_len
+            FROM uploads
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
+        return cur.fetchall()
+
+
+def debug_upload_count() -> int:
+    with db_connect() as conn:
+        cur = conn.execute("SELECT COUNT(*) FROM uploads;")
+        return int(cur.fetchone()[0])
+
+
 # -----------------------------
 # Uploads + readability
 # -----------------------------
@@ -388,7 +386,7 @@ def sidebar_tab_attempt_history(problem_id: str) -> None:
 def sidebar_tab_uploaded_files(problem_id: str) -> None:
     st.sidebar.subheader("Uploaded Files")
 
-    # ✅ Explicit refresh button (Streamlit-safe, avoids timing/rerun ambiguity)
+    # ✅ Explicit refresh button
     if st.sidebar.button("🔄 Refresh uploads"):
         st.rerun()
 
@@ -429,6 +427,29 @@ def sidebar_tab_uploaded_files(problem_id: str) -> None:
             st.warning("File not found in current runtime storage (Streamlit may have restarted).")
 
 
+def sidebar_debug_panel(problem_id: str) -> None:
+    with st.sidebar.expander("🔧 Debug (Uploads)", expanded=False):
+        st.write("**DB file:**", str(DB_FILE))
+        st.write("**DB exists:**", DB_FILE.exists())
+        st.write("**Uploads table rows (total):**", debug_upload_count())
+        st.write("**Uploads dir:**", str(UPLOADS_DIR))
+        st.write("**Uploads dir exists:**", UPLOADS_DIR.exists())
+
+        rows = debug_last_upload_rows(limit=10)
+        if not rows:
+            st.caption("No upload rows found in DB.")
+            return
+
+        st.caption("Last 10 upload rows (most recent first):")
+        for r in rows:
+            _id, created, attempt_id, part_id, filename, stored_path, readable, text_len = r
+            exists = Path(stored_path).exists()
+            st.write(
+                f"#{_id} | {created} | attempt {str(attempt_id)[:8]} | part {part_id} | "
+                f"{filename} | readable={bool(readable)} | exists={exists}"
+            )
+
+
 # -----------------------------
 # UI: Main problem
 # -----------------------------
@@ -453,17 +474,12 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     for p in parts:
         part_id = str(p.get("part_id", "")).strip() or "?"
         prompt = p.get("prompt", "")
-        expected = p.get("expected_output", {}) or {}
-        units = expected.get("units", "")
 
         st.markdown(f"### Part ({part_id})")
         if prompt:
             st.write(prompt)
 
-        label = "Answer"
-        if units:
-            label = f"Answer ({units})"
-        responses[part_id] = st.text_input(label, key=f"{pid}_{part_id}_answer")
+        responses[part_id] = st.text_input("Answer", key=f"{pid}_{part_id}_answer")
 
     submitted = st.button("Submit", key=f"{pid}_submit")
     if not submitted:
@@ -480,7 +496,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         part_id = str(p.get("part_id", "")).strip() or "?"
         is_correct, msg = grade_part(pid, part_id, responses.get(part_id, ""), answer_key)
         results[part_id] = (is_correct, msg)
-
         log_attempt_part(attempt_id, part_id, responses.get(part_id, ""), is_correct, msg)
 
         if is_correct is None:
@@ -507,7 +522,6 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
         st.markdown(f"### Part ({part_id}) — Upload")
         state_key = upload_state_key(attempt_id, part_id)
 
-        # ✅ Persistent confirmation so it doesn't flash/disappear
         if st.session_state.get(state_key) is True:
             st.success("✅ Upload successful. Your work has been saved.")
         else:
@@ -517,9 +531,11 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
                 key=f"{attempt_id}_{part_id}_pdf"
             )
             if uploaded is not None:
-                readable, _extracted_len, _stored_path = save_upload(attempt_id, part_id, uploaded)
+                readable, _extracted_len, stored_path = save_upload(attempt_id, part_id, uploaded)
                 st.session_state[state_key] = True
+
                 st.success("✅ Upload successful. Your work has been saved.")
+                st.caption(f"Saved to: {stored_path}")
 
                 if not readable:
                     st.warning(
@@ -556,7 +572,7 @@ safe_mkdir(LOGS_DIR)
 db_init()
 
 st.title("MEB Homework Tutor — Instructor Demo")
-st.caption("Sidebar tabs include Attempt History + Uploaded Files (with a Refresh button).")
+st.caption("Uploads are saved to disk + logged to SQLite; sidebar shows Attempt History + Uploaded Files.")
 
 # Load assignments
 try:
@@ -576,6 +592,9 @@ with tab1:
     sidebar_tab_attempt_history(problem_id)
 with tab2:
     sidebar_tab_uploaded_files(problem_id)
+
+# Always show debug panel (collapse by default)
+sidebar_debug_panel(problem_id)
 
 # Load selected problem
 try:
