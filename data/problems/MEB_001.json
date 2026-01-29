@@ -1,1 +1,26 @@
-
+{
+  "problem": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank.",
+  "feed": {
+    "flowrate_kmol_hr": 100,
+    "composition": {
+      "benzene": 0.5,
+      "toluene": 0.5
+    }
+  },
+  "operating_conditions": {
+    "temperature_C": 95,
+    "pressure_atm": 1
+  },
+  "vapor_composition": {
+    "benzene": 0.7,
+    "toluene": 0.3
+  },
+  "psat_at_95C_atm": {
+    "benzene": 1.55,
+    "toluene": 0.6
+  },
+  "assumptions": [
+    "Ideal behavior",
+    "Raoult's law applies: y_i P = x_i P_i^sat"
+  ]
+}
