@@ -7,7 +7,8 @@
 # - Upload workflow PER PART (PDF) shown only when that part is incorrect
 # - Persistent "✅ Upload successful..." message per part (survives Streamlit reruns)
 # - Fallback form PER PART
-# - Sidebar tabs: Attempt History + Uploaded Files (instructor-friendly)
+# - Sidebar tabs: Attempt History + Uploaded Files
+# - ✅ After saving an upload, force ONE extra rerun so the Uploaded Files tab updates immediately
 
 import csv
 import json
@@ -141,7 +142,7 @@ def grade_part(problem_id: str, part_id: str, student_text: str,
 
 
 # -----------------------------
-# Database logging
+# Database
 # -----------------------------
 def db_connect() -> sqlite3.Connection:
     safe_mkdir(LOGS_DIR)
@@ -244,8 +245,7 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
 
 def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Dict[str, Any]]:
     """
-    Returns uploads joined with attempts for the selected problem.
-    Each dict includes: created_utc, attempt_id, part_id, filename, stored_path, readable, extracted_text_len
+    Returns uploads joined with attempts for selected problem.
     """
     with db_connect() as conn:
         cur = conn.execute("""
@@ -333,6 +333,7 @@ def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
     st.session_state.setdefault("last_attempt_id", None)
+    st.session_state.setdefault("force_sidebar_refresh", False)
 
 
 # -----------------------------
@@ -416,7 +417,6 @@ def sidebar_tab_uploaded_files(problem_id: str) -> None:
         st.write(f'**Extracted text length:** {selected["extracted_text_len"]}')
         st.write(f'**Stored path:** {selected["stored_path"]}')
 
-        # Download button (if file exists)
         path = Path(selected["stored_path"])
         if path.exists():
             data = path.read_bytes()
@@ -471,7 +471,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     if not submitted:
         return
 
-    # Create attempt and log parts
     attempt_id = log_attempt(assignment, pid)
     st.session_state["last_attempt_id"] = attempt_id
 
@@ -493,7 +492,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         else:
             st.error(f"Part ({part_id}): {msg}")
 
-    # Per-part uploads for incorrect parts
     incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
     if incorrect_parts:
         st.warning("Upload your work for the parts you missed (one PDF per part).")
@@ -527,8 +525,6 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 
                 # ✅ Persist upload success so message survives reruns
                 st.session_state[state_key] = True
-
-                # ✅ Immediate feedback; persistent message will show on rerun
                 st.success("✅ Upload successful. Your work has been saved.")
 
                 if not readable:
@@ -536,6 +532,11 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
                         "⚠️ We could not confidently read this PDF. "
                         "Please complete the fallback form below."
                     )
+
+                # ✅ Force ONE extra rerun so the sidebar 'Uploaded files' tab updates immediately
+                if not st.session_state.get("force_sidebar_refresh", False):
+                    st.session_state["force_sidebar_refresh"] = True
+                    st.rerun()
 
         # Fallback form (always accessible)
         with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
@@ -560,6 +561,9 @@ def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None
 st.set_page_config(page_title="MEB Tutor (Instructor Demo)", layout="wide")
 init_session_state()
 
+# reset each run so the "one rerun" behavior can happen on next upload
+st.session_state["force_sidebar_refresh"] = False
+
 safe_mkdir(DATA_DIR)
 safe_mkdir(PROBLEMS_DIR)
 safe_mkdir(UPLOADS_DIR)
@@ -567,7 +571,7 @@ safe_mkdir(LOGS_DIR)
 db_init()
 
 st.title("MEB Homework Tutor — Instructor Demo")
-st.caption("Now includes sidebar tabs for Attempt History and Uploaded Files.")
+st.caption("Now includes sidebar tabs for Attempt History and Uploaded Files, with instant upload refresh.")
 
 # Load assignments
 try:
@@ -581,7 +585,7 @@ render_sidebar(assignments)
 assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
-# Sidebar tabs: Attempt History + Uploaded Files
+# Sidebar tabs
 tab1, tab2 = st.sidebar.tabs(["Attempt history", "Uploaded files"])
 with tab1:
     sidebar_tab_attempt_history(problem_id)
