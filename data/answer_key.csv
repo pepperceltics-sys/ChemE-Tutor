@@ -1,0 +1,3 @@
+problem_id,part_id,answer_value,answer_units,tolerance_type,tolerance_value
+MEB_002,a,40,mol/min,absolute,1
+MEB_002,b,48,mol/min,absolute,1
