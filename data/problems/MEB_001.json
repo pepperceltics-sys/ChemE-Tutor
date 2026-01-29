@@ -1,27 +1,42 @@
 {
   "problem_id": "MEB_001",
   "title": "Flash Tank Material Balance with Raoult's Law",
-  "statement": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank. The feed flow rate is 100 kmol/hr with composition z_B = 0.50 and z_T = 0.50. The flash tank operates at 95\u00b0C and 1 atm. The system reaches vapor\u2013liquid equilibrium and exits as a vapor stream and a liquid stream. The measured vapor composition is y_B = 0.70 and y_T = 0.30. At 95\u00b0C, the saturation pressures are P_B^sat = 1.55 atm and P_T^sat = 0.60 atm. Assume ideal behavior and that Raoult\u2019s law applies.",
+  "statement": "A liquid feed containing benzene (B) and toluene (T) enters a flash tank. The feed flow rate is 100 kmol/hr with composition z_B = 0.50 and z_T = 0.50. The flash tank operates at 95 °C and 1 atm. Use Raoult's law and appropriate material balances to determine the vapor and liquid flow rates and phase compositions.",
   "parts": [
     {
       "part_id": "a",
-      "prompt": "Perform a degrees of freedom analysis and give the number of unknown variables and Equations.",
+      "prompt": "Perform a degrees of freedom analysis and give the number of unknown variables and equations.",
       "input_type": "numeric",
-      "expected_output": {"name": "Unknowns"}
-        },
+      "expected_output": [
+        {
+          "name": "Unknowns",
+          "type": "integer"
+        }
+      ]
+    },
     {
       "part_id": "b",
       "prompt": "Solve for the vapor flow rate V, liquid flow rate L, and the liquid phase compositions x_B and x_T.",
       "input_type": "numeric",
-      "expected_output": 
-        {"name": "V","units": "kmol/hr",
-        "name": "L","units": "kmol/hr"}
-      {"name": "x_B","units": "mole fraction"}
-      {
-        "name": "x_T",
-        "units": "mole fraction"
+      "expected_output": [
+        {
+          "name": "V",
+          "units": "kmol/hr"
+        },
+        {
+          "name": "L",
+          "units": "kmol/hr"
+        },
+        {
+          "name": "x_B",
+          "units": "mole fraction"
+        },
+        {
+          "name": "x_T",
+          "units": "mole fraction"
         }
+      ]
     }
   ],
-    "notes": "Students should use overall and component material balances with Raoult\u2019s law to close the system."
-  }
+  "notes": "Students should use overall and component material balances with Raoult's law to close the system."
+}
