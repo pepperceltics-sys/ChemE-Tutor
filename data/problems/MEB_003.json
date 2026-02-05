@@ -1,60 +1,141 @@
 {
   "problem_id": "MEB_003",
-  "title": "...",
-  "statement": "...",
+  "title": "Flash Tank Material Balance (Binary Mixture)",
+  "statement": "A steady feed stream containing components A and B enters a flash tank at a flow rate of 120 mol/min. The feed composition is z_A = 0.60 and z_B = 0.40. The mixture partially vaporizes and exits as a vapor stream V and a liquid stream L. The vapor composition is y_A = 0.80 and y_B = 0.20, while the liquid composition is x_A = 0.30 and x_B = 0.70. Assume steady state and no reaction.\n\n(a) Write the overall and component A material balances.\n(b) Solve for V and L.",
   "parts": [
-    {"part_id": "a", "prompt": "...", "expected_output": {"name": "V", "units": "mol/min"}},
-    {"part_id": "b", "prompt": "...", "expected_output": {"name": "L", "units": "mol/min"}}
+    {
+      "part_id": "a",
+      "prompt": "Solve for the vapor flow rate, V.",
+      "expected_output": {
+        "name": "V",
+        "units": "mol/min"
+      }
+    },
+    {
+      "part_id": "b",
+      "prompt": "Solve for the liquid flow rate, L.",
+      "expected_output": {
+        "name": "L",
+        "units": "mol/min"
+      }
+    }
   ],
-
   "solution_spec": {
     "global": {
-      "assumptions": ["steady state", "no reaction", "binary mixture"],
+      "assumptions": [
+        "steady state",
+        "no reaction",
+        "binary mixture",
+        "single feed stream and two outlet streams (vapor and liquid)"
+      ],
       "variables": {
-        "F": "feed flow rate (mol/min)",
-        "V": "vapor flow rate (mol/min)",
-        "L": "liquid flow rate (mol/min)",
-        "z_A": "feed mole fraction of A",
-        "y_A": "vapor mole fraction of A",
-        "x_A": "liquid mole fraction of A"
+        "F": "Feed flow rate (mol/min)",
+        "V": "Vapor outlet flow rate (mol/min)",
+        "L": "Liquid outlet flow rate (mol/min)",
+        "z_A": "Feed mole fraction of A",
+        "y_A": "Vapor mole fraction of A",
+        "x_A": "Liquid mole fraction of A"
       }
     },
     "parts": {
       "a": {
-        "goal": "Compute vapor flow rate V",
+        "goal": "Determine the vapor flow rate V using overall and component A balances.",
         "required_equations": [
           "F = V + L",
           "F*z_A = V*y_A + L*x_A"
         ],
+        "required_concepts": [
+          "overall molar balance on the flash tank",
+          "component A molar balance on the flash tank",
+          "use of mole fractions to relate component flow to total flow"
+        ],
+        "checks": [
+          "Verify that the overall balance includes both outlet streams (V and L).",
+          "Verify that the component A balance includes A leaving in BOTH phases (V*y_A and L*x_A)."
+        ],
         "common_mistakes": [
           {
-            "id": "missing_liquid_term",
-            "trigger_examples": ["F*z_A = V*y_A"],
-            "hint": "Your component balance is missing the liquid outlet term (L*x_A)."
+            "id": "missing_liquid_term_in_component_balance",
+            "trigger_examples": [
+              "F*z_A = V*y_A",
+              "F*z_A = V*y_A + x_A"
+            ],
+            "hint": "Your component A balance should include A leaving in BOTH streams: V*y_A + L*x_A."
+          },
+          {
+            "id": "mixing_percent_and_fraction",
+            "trigger_examples": [
+              "z_A = 60",
+              "y_A = 80",
+              "x_A = 30"
+            ],
+            "hint": "Use mole fractions (0–1) in the balance equations. Convert percent to fractions before solving."
+          },
+          {
+            "id": "using_wrong_component_fraction",
+            "trigger_examples": [
+              "F*y_A = V*z_A + L*x_A",
+              "F*z_A = V*x_A + L*y_A"
+            ],
+            "hint": "Use z_A for the FEED composition, y_A for the VAPOR composition, and x_A for the LIQUID composition."
           }
         ],
         "allowed_hints": [
-          "Start with the overall balance, then write the component A balance."
+          "Start by writing the overall balance: total in = total out.",
+          "Then write the component A balance using mole fractions: (total flow)*(mole fraction).",
+          "Solve the two equations simultaneously for V and L."
+        ],
+        "resources": [
+          {
+            "label": "Material balances in flash systems (overall + component)",
+            "type": "textbook_section",
+            "reference": "Your course notes or MEB textbook section on phase-split material balances"
+          }
         ]
       },
       "b": {
-        "goal": "Compute liquid flow rate L",
+        "goal": "Determine the liquid flow rate L after solving for V and applying the overall balance.",
         "required_equations": [
           "F = V + L"
         ],
+        "required_concepts": [
+          "using the overall balance to relate outlet flow rates",
+          "substitution once one outlet flow is known"
+        ],
+        "checks": [
+          "If V is known, L must satisfy L = F - V.",
+          "L should be positive and less than F."
+        ],
         "common_mistakes": [
           {
-            "id": "forget_overall",
-            "trigger_examples": ["V = F"],
-            "hint": "Use the overall balance to relate V and L."
+            "id": "sign_error_overall_balance",
+            "trigger_examples": [
+              "L = F + V",
+              "F = L - V"
+            ],
+            "hint": "At steady state with one feed and two outlets, the overall balance is F = V + L, so L = F - V."
+          },
+          {
+            "id": "forgetting_to_use_overall_balance",
+            "trigger_examples": [
+              "L = (F*z_A)/(x_A)"
+            ],
+            "hint": "Use the overall balance to connect V and L. The component balance alone is not enough to determine L without V."
           }
         ],
         "allowed_hints": [
-          "Once you find V, use the overall balance to get L."
+          "Once you have V, compute L using L = F - V.",
+          "Quick check: V + L should equal the feed flow rate (120 mol/min)."
+        ],
+        "resources": [
+          {
+            "label": "Overall balance for steady-state flash tank",
+            "type": "textbook_section",
+            "reference": "Your course notes or MEB textbook section on steady-state overall balances"
+          }
         ]
       }
     }
   },
-
-  "notes": "No equilibrium calculations required."
+  "notes": "No equilibrium calculations required. Use steady-state overall and component A balances only. Do not show numerical answers in tutor feedback; provide conceptual guidance and equation-structure checks."
 }
