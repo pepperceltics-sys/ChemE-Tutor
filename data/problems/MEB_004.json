@@ -1,3 +1,4 @@
+# data/problems/MEB_004.json
 {
   "problem_id": "MEB_004",
   "title": "Flash Tank Material Balance (Binary Mixture)",
@@ -20,5 +21,115 @@
       }
     }
   ],
+  "solution_spec": {
+    "global": {
+      "instruction": "Use the symbology given in the problem statement. Treat z_A as the feed mole fraction of A, y_A as the vapor mole fraction of A, and x_A as the liquid mole fraction of A. Use F for feed flow rate (given as 80 mol/min), V for vapor flow rate, and L for liquid flow rate. Keep compositions as fractions (0–1).",
+      "assumptions": [
+        "steady state",
+        "no reaction",
+        "binary mixture",
+        "one feed stream and two outlet streams (vapor and liquid)"
+      ],
+      "variables": {
+        "F": "Feed flow rate (mol/min)",
+        "V": "Vapor outlet flow rate (mol/min)",
+        "L": "Liquid outlet flow rate (mol/min)",
+        "z_A": "Feed mole fraction of A",
+        "y_A": "Vapor mole fraction of A",
+        "x_A": "Liquid mole fraction of A"
+      }
+    },
+    "parts": {
+      "a": {
+        "goal": "Determine the vapor flow rate V using an overall balance and a component A balance.",
+        "required_equations": [
+          "F = V + L",
+          "F*z_A = V*y_A + L*x_A"
+        ],
+        "required_concepts": [
+          "overall molar balance on the flash tank",
+          "component A molar balance on the flash tank",
+          "component flow terms written as (total flow)*(mole fraction)"
+        ],
+        "checks": [
+          "Overall balance includes both outlet streams (V and L).",
+          "Component A balance includes A leaving in both phases: V*y_A and L*x_A.",
+          "Correct composition symbol is used with each stream (z with F, y with V, x with L)."
+        ],
+        "common_mistakes": [
+          {
+            "id": "missing_outlet_in_overall_balance",
+            "trigger_examples": [
+              "F = V",
+              "F = L"
+            ],
+            "hint": "At steady state with one feed and two outlets, the overall balance is F = V + L."
+          },
+          {
+            "id": "missing_phase_term_in_component_balance",
+            "trigger_examples": [
+              "F*z_A = V*y_A",
+              "F*z_A = L*x_A"
+            ],
+            "hint": "Your component A balance must include A leaving in BOTH outlets: V*y_A + L*x_A."
+          },
+          {
+            "id": "swapped_compositions",
+            "trigger_examples": [
+              "F*y_A = V*z_A + L*x_A",
+              "F*z_A = V*x_A + L*y_A"
+            ],
+            "hint": "Use z_A with the feed, y_A with the vapor outlet, and x_A with the liquid outlet."
+          },
+          {
+            "id": "percent_not_fraction",
+            "trigger_examples": [
+              "z_A = 25",
+              "y_A = 50",
+              "x_A = 10"
+            ],
+            "hint": "Compositions must be in fraction form (0–1). If you used percent values, divide by 100."
+          }
+        ],
+        "allowed_hints": [
+          "Write the overall balance first (total in = total out).",
+          "Then write the component A balance using mole fractions.",
+          "Solve the two equations simultaneously for V and L."
+        ]
+      },
+      "b": {
+        "goal": "Determine the liquid flow rate L using the overall balance after V is found (or solve simultaneously).",
+        "required_equations": [
+          "F = V + L",
+          "L = F - V"
+        ],
+        "checks": [
+          "V + L should equal the feed flow rate (80 mol/min).",
+          "L should be positive and less than F."
+        ],
+        "common_mistakes": [
+          {
+            "id": "sign_error_overall_balance",
+            "trigger_examples": [
+              "L = F + V",
+              "F = L - V"
+            ],
+            "hint": "From the overall balance F = V + L, solve for L as L = F - V."
+          },
+          {
+            "id": "solving_from_component_only",
+            "trigger_examples": [
+              "L = (F*z_A)/(x_A)"
+            ],
+            "hint": "Use BOTH the overall and component A balances. The component balance alone does not determine both V and L."
+          }
+        ],
+        "allowed_hints": [
+          "Once you have V, compute L using L = F - V.",
+          "Sanity check: V + L must equal 80 mol/min."
+        ]
+      }
+    }
+  },
   "notes": "Use steady-state overall and component A balances only. No equilibrium calculations required."
 }
