@@ -1,31 +1,12 @@
 # app.py
-# Instructor-demo-ready build (per-part uploads + sidebar "Uploaded files" tab)
-# Fixes StreamlitDuplicateElementKey by ensuring upload widgets are rendered in ONE place only
-# (main area) and the sidebar "Uploaded files" section only DISPLAYS what was uploaded.
+# Fix: uploads "disappearing" + sidebar Uploaded files updates immediately
 #
-# Features:
-# - Assignment -> Problem navigation
-# - Numeric answers per part
-# - CSV grading with tolerance
-# - Attempt logging (SQLite)
-# - Per-part PDF uploads (only for incorrect parts)
-# - Persistent "✅ Upload successful" per part (session_state)
-# - Fallback form per part
-# - Sidebar tabs: Attempts + Uploaded files (read-only list)
+# Key idea:
+# - When a PDF is uploaded, we store it in st.session_state (memory) so:
+#   (1) we can show a persistent "Upload successful" message per part
+#   (2) the sidebar "Uploaded files" tab updates immediately
 #
-# Repo structure:
-# meb_tutor_app/
-#   app.py
-#   data/
-#     assignments.json
-#     answer_key.csv
-#     problems/
-#       MEB_001.json
-#       ...
-#     uploads/
-#       .gitkeep
-#     logs/
-#       .gitkeep
+# We still save to disk + SQLite (optional but useful for audit trail).
 
 import csv
 import json
@@ -43,7 +24,6 @@ try:
     HAS_PYPDF2 = True
 except Exception:
     HAS_PYPDF2 = False
-
 
 # -----------------------------
 # Paths
@@ -85,8 +65,13 @@ def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_v
 
 
 def upload_state_key(attempt_id: str, part_id: str) -> str:
-    """Session key for persistent upload confirmation per (attempt, part)."""
-    return f"uploaded_{attempt_id}_{part_id}"
+    """Persistent per-attempt+part upload success flag."""
+    return f"uploaded_ok_{attempt_id}_{part_id}"
+
+
+def mem_store_key(problem_id: str) -> str:
+    """Where we keep in-memory uploads for the current session."""
+    return f"mem_uploads_{problem_id}"
 
 
 # -----------------------------
@@ -133,12 +118,8 @@ def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
     return key
 
 
-def grade_part(
-    problem_id: str,
-    part_id: str,
-    student_text: str,
-    answer_key: Dict[Tuple[str, str], Dict[str, str]],
-) -> Tuple[Optional[bool], str]:
+def grade_part(problem_id: str, part_id: str, student_text: str,
+               answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> Tuple[Optional[bool], str]:
     k = answer_key.get((problem_id, part_id))
     if not k:
         return None, "No answer key for this part (not graded yet)."
@@ -174,18 +155,15 @@ def db_connect() -> sqlite3.Connection:
 def db_init() -> None:
     safe_mkdir(LOGS_DIR)
     with db_connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS attempts (
                 attempt_id TEXT PRIMARY KEY,
                 created_utc TEXT NOT NULL,
                 assignment TEXT NOT NULL,
                 problem_id TEXT NOT NULL
             );
-            """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS attempt_parts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 attempt_id TEXT NOT NULL,
@@ -195,10 +173,8 @@ def db_init() -> None:
                 message TEXT,
                 FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id) ON DELETE CASCADE
             );
-            """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS uploads (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 attempt_id TEXT NOT NULL,
@@ -210,10 +186,8 @@ def db_init() -> None:
                 created_utc TEXT NOT NULL,
                 FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id) ON DELETE CASCADE
             );
-            """
-        )
-        conn.execute(
-            """
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS fallback (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 attempt_id TEXT NOT NULL,
@@ -223,88 +197,71 @@ def db_init() -> None:
                 created_utc TEXT NOT NULL,
                 FOREIGN KEY(attempt_id) REFERENCES attempts(attempt_id) ON DELETE CASCADE
             );
-            """
-        )
+        """)
         conn.commit()
 
 
 def log_attempt(assignment: str, problem_id: str) -> str:
     attempt_id = str(uuid.uuid4())
     with db_connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             INSERT INTO attempts (attempt_id, created_utc, assignment, problem_id)
             VALUES (?, ?, ?, ?)
-            """,
-            (attempt_id, utc_now_iso(), assignment, problem_id),
-        )
+        """, (attempt_id, utc_now_iso(), assignment, problem_id))
         conn.commit()
     return attempt_id
 
 
 def log_attempt_part(attempt_id: str, part_id: str, student_answer: str, is_correct: Optional[bool], message: str) -> None:
     with db_connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             INSERT INTO attempt_parts (attempt_id, part_id, student_answer, is_correct, message)
             VALUES (?, ?, ?, ?, ?)
-            """,
-            (attempt_id, part_id, student_answer, None if is_correct is None else int(is_correct), message),
-        )
+        """, (attempt_id, part_id, student_answer, None if is_correct is None else int(is_correct), message))
         conn.commit()
 
 
 def list_attempts_for_problem(problem_id: str, limit: int = 10) -> List[Tuple[str, str]]:
     with db_connect() as conn:
-        cur = conn.execute(
-            """
+        cur = conn.execute("""
             SELECT created_utc, attempt_id
             FROM attempts
             WHERE problem_id = ?
             ORDER BY created_utc DESC
             LIMIT ?
-            """,
-            (problem_id, limit),
-        )
+        """, (problem_id, limit))
         return list(cur.fetchall())
 
 
 def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], str]]:
     with db_connect() as conn:
-        cur = conn.execute(
-            """
+        cur = conn.execute("""
             SELECT part_id, student_answer, is_correct, message
             FROM attempt_parts
             WHERE attempt_id = ?
             ORDER BY part_id ASC
-            """,
-            (attempt_id,),
-        )
+        """, (attempt_id,))
         return list(cur.fetchall())
 
 
-def list_uploads_for_problem(problem_id: str, limit: int = 30) -> List[Tuple[str, str, str, str, int, int]]:
+def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Tuple[str, str, str, str]]:
     """
-    Returns rows:
-      (created_utc, attempt_id, part_id, filename, readable, extracted_text_len)
+    Returns rows: (created_utc, attempt_id, part_id, filename)
     """
     with db_connect() as conn:
-        cur = conn.execute(
-            """
-            SELECT u.created_utc, u.attempt_id, u.part_id, u.filename, u.readable, u.extracted_text_len
+        cur = conn.execute("""
+            SELECT u.created_utc, u.attempt_id, u.part_id, u.filename
             FROM uploads u
             JOIN attempts a ON a.attempt_id = u.attempt_id
             WHERE a.problem_id = ?
             ORDER BY u.created_utc DESC
             LIMIT ?
-            """,
-            (problem_id, limit),
-        )
+        """, (problem_id, limit))
         return list(cur.fetchall())
 
 
 # -----------------------------
-# Uploads + readability
+# Uploads + readability + MEMORY store
 # -----------------------------
 def try_extract_pdf_text(pdf_bytes: bytes) -> str:
     if not HAS_PYPDF2:
@@ -319,19 +276,15 @@ def try_extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
-def save_upload(attempt_id: str, part_id: str, uploaded_file) -> Tuple[bool, int]:
+def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> Tuple[bool, int]:
     """
-    Save PDF to: data/uploads/<attempt_id>/<part_id>/<filename>
-    Returns: (readable, extracted_text_len)
+    Writes to disk and records in SQLite. Returns (readable, extracted_text_len).
     """
     safe_mkdir(UPLOADS_DIR)
     part_dir = UPLOADS_DIR / attempt_id / part_id
     safe_mkdir(part_dir)
 
-    filename = uploaded_file.name
     stored_path = part_dir / filename
-
-    file_bytes = uploaded_file.getvalue()
     stored_path.write_bytes(file_bytes)
 
     extracted = try_extract_pdf_text(file_bytes)
@@ -339,27 +292,37 @@ def save_upload(attempt_id: str, part_id: str, uploaded_file) -> Tuple[bool, int
     extracted_len = len(extracted)
 
     with db_connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             INSERT INTO uploads (attempt_id, part_id, filename, stored_path, extracted_text_len, readable, created_utc)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (attempt_id, part_id, filename, str(stored_path), extracted_len, int(readable), utc_now_iso()),
-        )
+        """, (attempt_id, part_id, filename, str(stored_path), extracted_len, int(readable), utc_now_iso()))
         conn.commit()
 
     return readable, extracted_len
 
 
+def remember_upload_in_memory(problem_id: str, attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> None:
+    """
+    Save upload in session memory so the UI can show it immediately.
+    WARNING: large PDFs will use memory. For demos, keep PDFs small.
+    """
+    key = mem_store_key(problem_id)
+    st.session_state.setdefault(key, [])
+    st.session_state[key].insert(0, {
+        "created_utc": utc_now_iso(),
+        "attempt_id": attempt_id,
+        "part_id": part_id,
+        "filename": filename,
+        "bytes": file_bytes,  # for "saved in memory"
+    })
+
+
 def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: str) -> None:
     with db_connect() as conn:
-        conn.execute(
-            """
+        conn.execute("""
             INSERT INTO fallback (attempt_id, part_id, balance_equations, notes, created_utc)
             VALUES (?, ?, ?, ?, ?)
-            """,
-            (attempt_id, part_id, balance_equations, notes, utc_now_iso()),
-        )
+        """, (attempt_id, part_id, balance_equations, notes, utc_now_iso()))
         conn.commit()
 
 
@@ -424,16 +387,31 @@ def render_sidebar_tabs(problem_id: str) -> None:
                 st.caption(f"Attempt ID: {attempt_id}")
 
     with tab_uploads:
-        st.subheader("Uploads (read-only)")
-        st.caption("This tab only shows what has been uploaded. Upload widgets live in the main page to avoid key collisions.")
-        uploads = list_uploads_for_problem(problem_id, limit=25)
-        if not uploads:
-            st.caption("No uploads yet for this problem.")
+        st.subheader("Uploads (updates immediately)")
+
+        # 1) Show in-memory uploads first (instant)
+        mem_key = mem_store_key(problem_id)
+        mem_uploads = st.session_state.get(mem_key, [])
+
+        if mem_uploads:
+            st.caption("From this session (in memory):")
+            for u in mem_uploads[:20]:
+                st.write(f"📎 **{u['filename']}** — Part ({u['part_id']}), Attempt {u['attempt_id'][:8]}")
+                st.caption(f"{u['created_utc']}")
         else:
-            for created_utc, attempt_id, part_id, filename, readable, extracted_len in uploads:
-                badge = "✅" if readable == 1 else "⚠️"
-                st.write(f"{badge} **{filename}**  — Part ({part_id}), Attempt {attempt_id[:8]}")
-                st.caption(f"{created_utc} • readable={bool(readable)} • extracted_len={extracted_len}")
+            st.caption("No in-memory uploads yet for this problem (this session).")
+
+        st.divider()
+
+        # 2) Also show DB uploads (across reruns / persistence while container lives)
+        db_uploads = list_uploads_for_problem(problem_id, limit=20)
+        if db_uploads:
+            st.caption("From database (saved to disk + logged):")
+            for created_utc, attempt_id, part_id, filename in db_uploads:
+                st.write(f"🗂️ **{filename}** — Part ({part_id}), Attempt {attempt_id[:8]}")
+                st.caption(f"{created_utc}")
+        else:
+            st.caption("No database uploads yet for this problem.")
 
 
 # -----------------------------
@@ -498,39 +476,51 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
     if incorrect_parts:
         st.warning("Upload your work for the parts you missed (one PDF per part).")
-        render_per_part_uploads(attempt_id, incorrect_parts)
+        render_per_part_uploads(problem_id=pid, attempt_id=attempt_id, incorrect_parts=incorrect_parts)
     else:
         st.info("All graded parts are correct. No uploads needed.")
 
 
-def render_per_part_uploads(attempt_id: str, incorrect_parts: List[str]) -> None:
+def render_per_part_uploads(problem_id: str, attempt_id: str, incorrect_parts: List[str]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
 
-    st.caption("Upload a PDF for each incorrect part. If it can't be read, complete the fallback form for that part.")
+    st.caption("Uploads are stored in memory immediately and listed in the sidebar 'Uploaded files' tab.")
 
     for part_id in incorrect_parts:
         st.markdown(f"### Part ({part_id}) — Upload")
 
         state_key = upload_state_key(attempt_id, part_id)
 
-        # Persistent confirmation across reruns
+        # Persistent confirmation across reruns (per attempt+part)
         if st.session_state.get(state_key) is True:
-            st.success("✅ Upload successful. Your work has been saved.")
+            st.success("✅ Upload saved (this session). Check the sidebar → Uploaded files.")
         else:
             uploaded = st.file_uploader(
                 f"Upload PDF for Part ({part_id})",
                 type=["pdf"],
-                key=f"uploader_{attempt_id}_{part_id}",  # stable + unique (we render uploaders only here)
+                key=f"uploader_{attempt_id}_{part_id}",  # only rendered here (one place), so safe
             )
 
             if uploaded is not None:
-                readable, _extracted_len = save_upload(attempt_id, part_id, uploaded)
-                st.session_state[state_key] = True
-                st.success("✅ Upload successful. Your work has been saved.")
+                file_bytes = uploaded.getvalue()
+                filename = uploaded.name
 
+                # 1) Save in memory (immediate UI trust + sidebar updates)
+                remember_upload_in_memory(problem_id, attempt_id, part_id, filename, file_bytes)
+
+                # 2) Save to disk + DB (optional but useful)
+                readable, _extracted_len = save_upload_to_disk_and_db(attempt_id, part_id, filename, file_bytes)
+
+                # Mark uploaded for persistent message
+                st.session_state[state_key] = True
+
+                st.success("✅ Upload saved (this session). Check the sidebar → Uploaded files.")
                 if not readable:
                     st.warning("⚠️ We could not confidently read this PDF. Please complete the fallback form below.")
+
+                # Force a rerun so sidebar tab shows it immediately
+                st.rerun()
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
             balance = st.text_area(
@@ -561,7 +551,7 @@ safe_mkdir(LOGS_DIR)
 db_init()
 
 st.title("MEB Homework Tutor")
-st.caption("Uploads are per-part. Sidebar shows Attempt history + Uploaded files (read-only).")
+st.caption("Uploads are stored in memory immediately and visible in the sidebar Uploaded files tab.")
 
 # Load assignments
 try:
@@ -575,7 +565,7 @@ render_sidebar(assignments)
 assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
-# Sidebar tabs (read-only views; NO upload widgets here)
+# Sidebar tabs
 render_sidebar_tabs(problem_id)
 
 # Load problem
