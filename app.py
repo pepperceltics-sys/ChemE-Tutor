@@ -1,16 +1,15 @@
 # app.py
-# MEB Tutor — instructor demo build
+# MEB Tutor — stable submit + uploads (no disappearing) + unitless-safe + legacy expected_output-safe
 #
-# Includes:
-# - Assignment -> Problem navigation
-# - Numeric answers per part
-# - CSV grading with tolerance
-# - Attempt logging (SQLite)
-# - Per-part PDF uploads shown only for incorrect parts
-# - Uploads saved in MEMORY (session_state) so they don't "disappear" + sidebar updates immediately
-# - Uploads also saved to DISK + logged to SQLite (while container persists)
-# - Sidebar tabs: Attempt history + Uploaded files (read-only; no upload widgets there)
-# - FIX: unitless parts (show units only if they exist; no "expected units" dialogue when unitless)
+# Fixes included:
+# 1) Upload UI no longer disappears after you upload:
+#    - We persist the "active attempt" + incorrect parts in st.session_state, so reruns keep the upload section visible.
+# 2) Sidebar "Uploaded files" updates immediately:
+#    - We store uploads in memory (session_state) AND also log to DB/disk.
+# 3) Unitless parts:
+#    - Only show units if they exist (no “Expected units” for unitless).
+# 4) Legacy problem schemas:
+#    - expected_output can be dict OR string OR list-of-dicts (like your MEB_001).
 
 import csv
 import json
@@ -22,10 +21,9 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import streamlit as st
 
-# Optional typed-PDF extraction (nice-to-have)
+# Optional typed-PDF extraction
 try:
     import PyPDF2  # type: ignore
-
     HAS_PYPDF2 = True
 except Exception:
     HAS_PYPDF2 = False
@@ -71,13 +69,28 @@ def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_v
 
 
 def upload_state_key(attempt_id: str, part_id: str) -> str:
-    """Session key for persistent upload confirmation per (attempt, part)."""
     return f"uploaded_ok_{attempt_id}_{part_id}"
 
 
 def mem_store_key(problem_id: str) -> str:
-    """Session key for in-memory uploads list per problem (this browser session)."""
     return f"mem_uploads_{problem_id}"
+
+
+def extract_units_from_expected_output(expected_raw: Any) -> str:
+    """
+    Supports:
+      - dict: {"name": "...", "units": "..."}
+      - str:  "kmol/hr" (treat as units)
+      - list: [{"name": "...", "units": "..."}] (use first dict's units)
+      - anything else: unitless
+    """
+    if isinstance(expected_raw, dict):
+        return (expected_raw.get("units") or "").strip()
+    if isinstance(expected_raw, str):
+        return expected_raw.strip()
+    if isinstance(expected_raw, list) and expected_raw and isinstance(expected_raw[0], dict):
+        return (expected_raw[0].get("units") or "").strip()
+    return ""
 
 
 # -----------------------------
@@ -125,7 +138,7 @@ def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
 
 
 # -----------------------------
-# Grading (FIXED: unitless handling)
+# Grading (unitless-safe)
 # -----------------------------
 def grade_part(
     problem_id: str,
@@ -144,14 +157,12 @@ def grade_part(
     ans_val = parse_float(k.get("answer_value", ""))
     tol_val = parse_float(k.get("tolerance_value", ""))
     tol_type = (k.get("tolerance_type") or "absolute").strip()
-    ans_units = (k.get("answer_units") or "").strip()  # ✅ may be blank/unitless
+    ans_units = (k.get("answer_units") or "").strip()
 
     if ans_val is None or tol_val is None:
         return None, "Answer key row invalid (check CSV)."
 
     ok = within_tolerance(student_val, ans_val, tol_type, tol_val)
-
-    # ✅ Only show units if they exist
     units_msg = f" Expected units: {ans_units}" if ans_units else ""
 
     if ok:
@@ -282,9 +293,6 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
 
 
 def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Tuple[str, str, str, str]]:
-    """
-    Returns rows: (created_utc, attempt_id, part_id, filename)
-    """
     with db_connect() as conn:
         cur = conn.execute(
             """
@@ -317,9 +325,6 @@ def try_extract_pdf_text(pdf_bytes: bytes) -> str:
 
 
 def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> Tuple[bool, int]:
-    """
-    Writes to disk and records in SQLite. Returns (readable, extracted_text_len).
-    """
     safe_mkdir(UPLOADS_DIR)
     part_dir = UPLOADS_DIR / attempt_id / part_id
     safe_mkdir(part_dir)
@@ -345,10 +350,6 @@ def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, fil
 
 
 def remember_upload_in_memory(problem_id: str, attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> None:
-    """
-    Save upload in session memory so the UI + sidebar updates immediately.
-    (For demos, keep PDFs small so memory stays reasonable.)
-    """
     key = mem_store_key(problem_id)
     st.session_state.setdefault(key, [])
     st.session_state[key].insert(
@@ -381,7 +382,12 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
 def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
-    st.session_state.setdefault("last_attempt_id", None)
+
+    # Persist "submitted state" so reruns keep showing results/uploads
+    st.session_state.setdefault("active_problem_id", None)
+    st.session_state.setdefault("active_attempt_id", None)
+    st.session_state.setdefault("active_incorrect_parts", [])
+    st.session_state.setdefault("active_results", {})  # {part_id: (is_correct, msg)}
 
 
 # -----------------------------
@@ -438,9 +444,8 @@ def render_sidebar_tabs(problem_id: str) -> None:
     with tab_uploads:
         st.subheader("Uploads (updates immediately)")
 
-        # 1) In-memory uploads (this session)
-        mem_key = mem_store_key(problem_id)
-        mem_uploads = st.session_state.get(mem_key, [])
+        # In-memory (instant, this browser session)
+        mem_uploads = st.session_state.get(mem_store_key(problem_id), [])
         if mem_uploads:
             st.caption("From this session (in memory):")
             for u in mem_uploads[:25]:
@@ -451,7 +456,7 @@ def render_sidebar_tabs(problem_id: str) -> None:
 
         st.divider()
 
-        # 2) DB uploads (while container persists)
+        # DB (saved to disk + logged)
         db_uploads = list_uploads_for_problem(problem_id, limit=25)
         if db_uploads:
             st.caption("From database (saved to disk + logged):")
@@ -488,9 +493,7 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         part_id = str(p.get("part_id", "")).strip() or "?"
         prompt = p.get("prompt", "")
 
-        # ✅ FIX: units may be missing/blank (unitless)
-        expected = p.get("expected_output", {}) or {}
-        units = (expected.get("units") or "").strip()
+        units = extract_units_from_expected_output(p.get("expected_output", None))
 
         st.markdown(f"### Part ({part_id})")
         if prompt:
@@ -500,36 +503,50 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         responses[part_id] = st.text_input(label, key=f"ans_{pid}_{part_id}")
 
     submitted = st.button("Submit", key=f"submit_{pid}")
-    if not submitted:
-        return
 
-    attempt_id = log_attempt(assignment, pid)
-    st.session_state["last_attempt_id"] = attempt_id
+    # -------------------------
+    # If user just submitted, grade + store "active attempt" state
+    # -------------------------
+    if submitted:
+        attempt_id = log_attempt(assignment, pid)
 
-    st.success(f"Submission logged. Attempt ID: {attempt_id[:8]}")
-    st.subheader("Results")
+        st.subheader("Results")
+        results: Dict[str, Tuple[Optional[bool], str]] = {}
+        for p in parts:
+            part_id = str(p.get("part_id", "")).strip() or "?"
+            is_correct, msg = grade_part(pid, part_id, responses.get(part_id, ""), answer_key)
+            results[part_id] = (is_correct, msg)
 
-    results: Dict[str, Tuple[Optional[bool], str]] = {}
-    for p in parts:
-        part_id = str(p.get("part_id", "")).strip() or "?"
-        is_correct, msg = grade_part(pid, part_id, responses.get(part_id, ""), answer_key)
-        results[part_id] = (is_correct, msg)
+            log_attempt_part(attempt_id, part_id, responses.get(part_id, ""), is_correct, msg)
 
-        log_attempt_part(attempt_id, part_id, responses.get(part_id, ""), is_correct, msg)
+            if is_correct is None:
+                st.info(f"Part ({part_id}): {msg}")
+            elif is_correct:
+                st.success(f"Part ({part_id}): {msg}")
+            else:
+                st.error(f"Part ({part_id}): {msg}")
 
-        if is_correct is None:
-            st.info(f"Part ({part_id}): {msg}")
-        elif is_correct:
-            st.success(f"Part ({part_id}): {msg}")
-        else:
-            st.error(f"Part ({part_id}): {msg}")
+        incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
 
-    incorrect_parts = [part for part, (ok, _msg) in results.items() if ok is False]
-    if incorrect_parts:
-        st.warning("Upload your work for the parts you missed (one PDF per part).")
-        render_per_part_uploads(problem_id=pid, attempt_id=attempt_id, incorrect_parts=incorrect_parts)
-    else:
-        st.info("All graded parts are correct. No uploads needed.")
+        # ✅ persist across reruns (this is the key fix)
+        st.session_state["active_problem_id"] = pid
+        st.session_state["active_attempt_id"] = attempt_id
+        st.session_state["active_incorrect_parts"] = incorrect_parts
+        st.session_state["active_results"] = results
+
+    # -------------------------
+    # Always render uploads/results if there is an active attempt for this problem
+    # (prevents “unsubmitted” after upload rerun)
+    # -------------------------
+    if st.session_state.get("active_problem_id") == pid:
+        attempt_id_active = st.session_state.get("active_attempt_id")
+        incorrect_parts_active = st.session_state.get("active_incorrect_parts") or []
+
+        if attempt_id_active and incorrect_parts_active:
+            st.warning("Upload your work for the parts you missed (one PDF per part).")
+            render_per_part_uploads(problem_id=pid, attempt_id=attempt_id_active, incorrect_parts=incorrect_parts_active)
+        elif attempt_id_active:
+            st.info("All graded parts are correct. No uploads needed.")
 
 
 def render_per_part_uploads(problem_id: str, attempt_id: str, incorrect_parts: List[str]) -> None:
@@ -542,11 +559,9 @@ def render_per_part_uploads(problem_id: str, attempt_id: str, incorrect_parts: L
 
         state_key = upload_state_key(attempt_id, part_id)
 
-        # Persistent confirmation across reruns (per attempt+part)
         if st.session_state.get(state_key) is True:
             st.success("✅ Upload saved. Check the sidebar → Uploaded files.")
         else:
-            # IMPORTANT: upload widgets are rendered ONLY here (one place), so keys won't collide
             uploaded = st.file_uploader(
                 f"Upload PDF for Part ({part_id})",
                 type=["pdf"],
@@ -557,21 +572,17 @@ def render_per_part_uploads(problem_id: str, attempt_id: str, incorrect_parts: L
                 file_bytes = uploaded.getvalue()
                 filename = uploaded.name
 
-                # 1) Save in memory (instant UI trust + sidebar updates)
+                # 1) Save in memory (instant sidebar update)
                 remember_upload_in_memory(problem_id, attempt_id, part_id, filename, file_bytes)
 
-                # 2) Save to disk + DB (useful audit trail)
+                # 2) Save to disk + DB (audit trail)
                 readable, _extracted_len = save_upload_to_disk_and_db(attempt_id, part_id, filename, file_bytes)
 
-                # Mark uploaded for persistent message
                 st.session_state[state_key] = True
-
                 st.success("✅ Upload saved. Check the sidebar → Uploaded files.")
                 if not readable:
                     st.warning("⚠️ We could not confidently read this PDF. Please complete the fallback form below.")
-
-                # Force rerun so sidebar tab refreshes immediately
-                st.rerun()
+                # No forced st.rerun() — upload already triggers rerun; and active attempt state keeps UI visible.
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
             balance = st.text_area(
@@ -602,7 +613,7 @@ safe_mkdir(LOGS_DIR)
 db_init()
 
 st.title("MEB Homework Tutor")
-st.caption("Per-part uploads + attempt logging + sidebar uploads list. Unitless parts are supported.")
+st.caption("Stable submit + per-part uploads + sidebar uploads list. Unitless + legacy expected_output supported.")
 
 # Load assignments
 try:
@@ -616,7 +627,7 @@ render_sidebar(assignments)
 assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
-# Sidebar tabs (read-only; NO upload widgets here)
+# Sidebar tabs (read-only; no upload widgets here)
 render_sidebar_tabs(problem_id)
 
 # Load selected problem
