@@ -117,7 +117,6 @@ def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
 
     return key
 
-
 def grade_part(problem_id: str, part_id: str, student_text: str,
                answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> Tuple[Optional[bool], str]:
     k = answer_key.get((problem_id, part_id))
@@ -130,16 +129,19 @@ def grade_part(problem_id: str, part_id: str, student_text: str,
 
     ans_val = parse_float(k.get("answer_value", ""))
     tol_val = parse_float(k.get("tolerance_value", ""))
-    tol_type = k.get("tolerance_type", "absolute")
-    ans_units = k.get("answer_units", "")
+    tol_type = (k.get("tolerance_type") or "absolute").strip()
+    ans_units = (k.get("answer_units") or "").strip()
 
     if ans_val is None or tol_val is None:
         return None, "Answer key row invalid (check CSV)."
 
     ok = within_tolerance(student_val, ans_val, tol_type, tol_val)
+
+    units_msg = f" Expected units: {ans_units}" if ans_units else ""
+
     if ok:
-        return True, f"Correct (within {tol_type} tolerance). Expected units: {ans_units}"
-    return False, f"Incorrect. Expected units: {ans_units}"
+        return True, f"Correct (within {tol_type} tolerance).{units_msg}"
+    return False, f"Incorrect.{units_msg}"
 
 
 # -----------------------------
