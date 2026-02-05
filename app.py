@@ -11,6 +11,10 @@
 # Key fix vs your current behavior:
 # ✅ Persist the "active attempt" (attempt_id + incorrect parts) in st.session_state
 # so the upload UI keeps rendering after Streamlit reruns.
+#
+# NEW FIX (for unit-less parts not loading):
+# ✅ Make expected_output + units parsing type-safe (handles missing/None/wrong-type)
+# ✅ Don’t print “Expected units:” when units are blank in the answer key
 
 import csv
 import json
@@ -152,15 +156,19 @@ def grade_part(problem_id: str, part_id: str, student_text: str,
     ans_val = parse_float(k.get("answer_value", ""))
     tol_val = parse_float(k.get("tolerance_value", ""))
     tol_type = k.get("tolerance_type", "absolute")
-    ans_units = k.get("answer_units", "")
+    ans_units = (k.get("answer_units", "") or "").strip()
 
     if ans_val is None or tol_val is None:
         return None, "Answer key row invalid (check CSV)."
 
     ok = within_tolerance(student_val, ans_val, tol_type, tol_val)
+
+    # ✅ Only show units text if units are non-empty
+    units_msg = f" Expected units: {ans_units}" if ans_units else ""
+
     if ok:
-        return True, f"Correct (within {tol_type} tolerance). Expected units: {ans_units}"
-    return False, f"Incorrect. Expected units: {ans_units}"
+        return True, f"Correct (within {tol_type} tolerance).{units_msg}"
+    return False, f"Incorrect.{units_msg}"
 
 
 # -----------------------------
@@ -390,8 +398,6 @@ def render_per_part_uploads_in_memory(attempt_id: str, incorrect_parts: List[str
                 st.session_state.pop(upload_state_key(attempt_id, part_id), None)
                 st.rerun()
         else:
-            # IMPORTANT: file_uploader triggers a rerun when a file is chosen;
-            # our active_attempt persistence ensures this UI stays visible.
             uploaded = st.file_uploader(
                 f"Upload PDF for Part ({part_id})",
                 type=["pdf"],
@@ -400,7 +406,6 @@ def render_per_part_uploads_in_memory(attempt_id: str, incorrect_parts: List[str
             if uploaded is not None:
                 info = store_upload_in_memory(attempt_id, part_id, uploaded)
 
-                # Immediate proof panel
                 st.success("✅ Upload received (stored in memory).")
                 st.write(f"**File:** {info['filename']}")
                 st.write(f"**Size:** {info['size']} bytes")
@@ -437,8 +442,13 @@ def render_problem(problem: Dict[str, Any], assignment: str,
     for p in parts:
         part_id = str(p.get("part_id", "")).strip() or "?"
         prompt = p.get("prompt", "")
-        expected = p.get("expected_output", {}) or {}
-        units = expected.get("units", "")
+
+        # ✅ Robust handling: expected_output can be missing/None/wrong-type
+        expected_raw = p.get("expected_output", {})
+        expected: Dict[str, Any] = expected_raw if isinstance(expected_raw, dict) else {}
+
+        units_raw = expected.get("units", "")
+        units = (str(units_raw).strip() if units_raw is not None else "")
 
         st.markdown(f"### Part ({part_id})")
         if prompt:
@@ -472,7 +482,6 @@ def render_problem(problem: Dict[str, Any], assignment: str,
 
         incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
 
-        # ✅ Persist attempt context so upload UI survives reruns
         st.session_state["active_attempt"] = {
             "attempt_id": attempt_id,
             "problem_id": pid,
@@ -487,7 +496,6 @@ def render_problem(problem: Dict[str, Any], assignment: str,
         else:
             st.info("All graded parts are correct. No uploads needed.")
 
-    # ✅ On rerun (e.g., after file upload), keep showing upload UI for the active attempt
     active = st.session_state.get("active_attempt")
     if active and active.get("problem_id") == pid:
         attempt_id_active = active.get("attempt_id")
