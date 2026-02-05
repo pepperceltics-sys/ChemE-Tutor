@@ -1,24 +1,98 @@
 {
   "problem_id": "MEB_006",
-  "title": "Flash Tank Material Balance (Binary Mixture)",
+  "title": "Flash Drum Material Balance (Binary Mixture)",
   "statement": "A flash drum operates at steady state with a feed of 60 mol/min containing components A and B. The feed composition is z_A = 0.50 and z_B = 0.50. The vapor outlet has composition y_A = 0.75 and y_B = 0.25, and the liquid outlet has composition x_A = 0.35 and x_B = 0.65.\n\n(a) Write the overall and component A balances.\n(b) Solve for the vapor and liquid flow rates.",
   "parts": [
     {
       "part_id": "a",
       "prompt": "Solve for the vapor flow rate, V.",
-      "expected_output": {
-        "name": "V",
-        "units": "mol/min"
-      }
+      "input_type": "numeric",
+      "expected_output": { "name": "V", "units": "mol/min" }
     },
     {
       "part_id": "b",
       "prompt": "Solve for the liquid flow rate, L.",
-      "expected_output": {
-        "name": "L",
-        "units": "mol/min"
-      }
+      "input_type": "numeric",
+      "expected_output": { "name": "L", "units": "mol/min" }
     }
   ],
-  "notes": "Assume steady state and no reaction. Use overall and component A balances only."
+  "notes": "Assume steady state and no reaction. Use overall and component A balances only.",
+  "tutor_layer": {
+    "version": "1.0",
+    "topic_tags": ["material_balance", "flash_drum", "binary_mixture", "steady_state"],
+    "allowed_help_level": "diagnostic_hints_only",
+    "learning_objectives": [
+      "Apply steady-state overall and component material balances to a two-outlet unit.",
+      "Correctly use z (feed), y (vapor), and x (liquid) compositions.",
+      "Solve a 2x2 linear system for V and L using balances."
+    ],
+    "expected_setup": {
+      "knowns": {
+        "F": { "value": 60, "units": "mol/min" },
+        "z_A": { "value": 0.50, "units": "mol/mol" },
+        "y_A": { "value": 0.75, "units": "mol/mol" },
+        "x_A": { "value": 0.35, "units": "mol/mol" }
+      },
+      "unknowns": [
+        { "symbol": "V", "units": "mol/min" },
+        { "symbol": "L", "units": "mol/min" }
+      ],
+      "required_equations": [
+        {
+          "id": "overall",
+          "description": "Overall molar balance",
+          "canonical_forms": ["F = V + L"]
+        },
+        {
+          "id": "component_A",
+          "description": "Component A balance",
+          "canonical_forms": ["F*z_A = V*y_A + L*x_A"]
+        }
+      ]
+    },
+    "common_mistakes": [
+      {
+        "code": "MIX_XY_Z",
+        "symptom": "Uses z_A for outlets or swaps x_A and y_A.",
+        "coach_message": "Use z for the feed, y for vapor composition, and x for liquid composition."
+      },
+      {
+        "code": "PERCENT_AS_WHOLE",
+        "symptom": "Treats 0.50 as 50, or otherwise mixes percent with fraction.",
+        "coach_message": "Use composition as a fraction (e.g., 50% → 0.50)."
+      },
+      {
+        "code": "MISSING_ONE_EQUATION",
+        "symptom": "Only writes one balance equation but tries to solve for both V and L.",
+        "coach_message": "You need two independent equations to solve for two unknowns: overall + one component balance."
+      },
+      {
+        "code": "SIGN_OR_SIDE_ERROR",
+        "symptom": "Inconsistent inlet/outlet sign convention (e.g., F = L − V).",
+        "coach_message": "At steady state with one inlet and two outlets, the overall balance should be In = Out."
+      }
+    ],
+    "hint_ladder": [
+      {
+        "level": 1,
+        "hint": "Write the overall balance first: steady state means no accumulation."
+      },
+      {
+        "level": 2,
+        "hint": "Then write a component A balance using z_A for the feed and y_A/x_A for the outlets."
+      },
+      {
+        "level": 3,
+        "hint": "Solve the two linear equations for V and L, then check that V + L equals the feed flow rate."
+      }
+    ],
+    "work_upload_expectations": {
+      "what_to_look_for_in_student_work": [
+        "Overall balance written clearly (F = V + L).",
+        "Component A balance using the correct compositions (z_A, y_A, x_A).",
+        "Algebra steps solving for V and L."
+      ],
+      "if_pdf_unreadable_prompt": "Please type your overall balance and your component A balance, then show how you solved for V and L."
+    }
+  }
 }
