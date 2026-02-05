@@ -2,18 +2,23 @@
   "problem_id": "MEB_003",
   "title": "Flash Tank Material Balance (Binary Mixture)",
   "statement": "A steady feed stream containing components A and B enters a flash tank at a flow rate of 120 mol/min. The feed composition is z_A = 0.60 and z_B = 0.40. The mixture partially vaporizes and exits as a vapor stream V and a liquid stream L. The vapor composition is y_A = 0.80 and y_B = 0.20, while the liquid composition is x_A = 0.30 and x_B = 0.70. Assume steady state and no reaction.\n\n(a) Write the overall and component A material balances.\n(b) Solve for V and L.",
-  "inputs_expected": {
-    "answer_type": "numeric",
-    "expected_outputs": [
-      {
+  "parts": [
+    {
+      "part_id": "a",
+      "prompt": "Solve for the vapor flow rate, V.",
+      "expected_output": {
         "name": "V",
         "units": "mol/min"
-      },
-      {
+      }
+    },
+    {
+      "part_id": "b",
+      "prompt": "Solve for the liquid flow rate, L.",
+      "expected_output": {
         "name": "L",
         "units": "mol/min"
       }
-    ],
-    "notes": "No equilibrium calculations required."
-  }
+    }
+  ],
+  "notes": "No equilibrium calculations required. Use steady-state overall and component A balances."
 }
