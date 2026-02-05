@@ -2,18 +2,23 @@
   "problem_id": "MEB_006",
   "title": "Flash Tank Material Balance (Binary Mixture)",
   "statement": "A flash drum operates at steady state with a feed of 60 mol/min containing components A and B. The feed composition is z_A = 0.50 and z_B = 0.50. The vapor outlet has composition y_A = 0.75 and y_B = 0.25, and the liquid outlet has composition x_A = 0.35 and x_B = 0.65.\n\n(a) Write the overall and component A balances.\n(b) Solve for the vapor and liquid flow rates.",
-  "inputs_expected": {
-    "answer_type": "numeric",
-    "expected_outputs": [
-      {
+  "parts": [
+    {
+      "part_id": "a",
+      "prompt": "Solve for the vapor flow rate, V.",
+      "expected_output": {
         "name": "V",
         "units": "mol/min"
-      },
-      {
+      }
+    },
+    {
+      "part_id": "b",
+      "prompt": "Solve for the liquid flow rate, L.",
+      "expected_output": {
         "name": "L",
         "units": "mol/min"
       }
-    ],
-    "notes": "Assume steady state and no reaction."
-  }
+    }
+  ],
+  "notes": "Assume steady state and no reaction. Use overall and component A balances only."
 }
