@@ -448,7 +448,15 @@ def render_problem(problem: Dict[str, Any], assignment: str,
         expected: Dict[str, Any] = expected_raw if isinstance(expected_raw, dict) else {}
 
         units_raw = expected.get("units", "")
-        units = (str(units_raw).strip() if units_raw is not None else "")
+        units_json = (str(units_raw).strip() if units_raw is not None else "")
+
+        # ✅ NEW: Fallback to answer key units if JSON units are blank
+        ak_row = answer_key.get((pid, part_id), {}) or {}
+        units_key = (ak_row.get("answer_units", "") or "").strip()
+
+        # Use JSON units if present; otherwise use answer key units
+        units = units_json if units_json else units_key
+
 
         st.markdown(f"### Part ({part_id})")
         if prompt:
