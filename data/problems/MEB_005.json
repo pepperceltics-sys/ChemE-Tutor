@@ -1,0 +1,19 @@
+{
+  "problem_id": "MEB_005",
+  "title": "Flash Tank Material Balance (Binary Mixture)",
+  "statement": "A binary mixture of components A and B enters a flash tank at 150 mol/min. The feed contains 45 mol% A and 55 mol% B. The vapor stream leaving the flash tank contains 65 mol% A, while the liquid stream contains 25 mol% A. Assume steady state and no chemical reactions.\n\n(a) Set up the overall and component A balances.\n(b) Calculate the vapor and liquid flow rates.",
+  "inputs_expected": {
+    "answer_type": "numeric",
+    "expected_outputs": [
+      {
+        "name": "V",
+        "units": "mol/min"
+      },
+      {
+        "name": "L",
+        "units": "mol/min"
+      }
+    ],
+    "notes": "No phase equilibrium relations are needed."
+  }
+}
