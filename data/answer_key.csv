@@ -6,3 +6,13 @@ MEB_001,d,0.452,,absolute,1
 MEB_001,e,0.548,,absolute,1
 MEB_002,a,40,mol/min,absolute,1
 MEB_002,b,48,mol/min,absolute,1
+MEB_003,a,72,mol/min,absolute,1
+MEB_003,b,48,mol/min,absolute,1
+MEB_004,a,30,mol/min,absolute,1
+MEB_004,b,50,mol/min,absolute,1
+MEB_005,a,75,mol/min,absolute,1
+MEB_005,b,75,mol/min,absolute,1
+MEB_006,a,22.5,mol/min,absolute,1
+MEB_006,b,37.5,mol/min,absolute,1
+MEB_007,a,75,mol/min,absolute,1
+MEB_007,b,125,mol/min,absolute,1
