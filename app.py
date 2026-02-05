@@ -441,7 +441,10 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         part_id = str(p.get("part_id", "")).strip() or "?"
         prompt = p.get("prompt", "")
         expected = p.get("expected_output", {}) or {}
-        units = expected.get("units", "")
+        units = (expected.get("units") or "").strip()
+
+        label = "Answer" if not units else f"Answer ({units})"
+        responses[part_id] = st.text_input(label, key=f"ans_{pid}_{part_id}")
 
         st.markdown(f"### Part ({part_id})")
         if prompt:
