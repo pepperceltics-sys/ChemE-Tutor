@@ -1,21 +1,19 @@
 # app.py
-# MEB Tutor — stable submit + uploads + AI-read pipeline (PDF -> fallback -> feedback-ready)
+# MEB Tutor — uploads + PDF text extraction + open-ended AI feedback (guardrailed)
 #
-# ✅ Includes (merged):
-# - Persisted "active attempt" so uploads/results don't disappear on rerun
-# - Uploads saved to disk + SQLite; sidebar shows uploaded files
-# - Uploads also tracked in session memory (instant sidebar updates)
-# - Stores extracted PDF text in DB (with safe migration)
-# - Readability detection (fixed)
-# - Fallback form auto-expands when PDF is unreadable
-# - “Get AI feedback” per part (stubbed; replace with real model call)
-# - Unitless + legacy expected_output support (dict / str / list-of-dicts)
-# - Nomenclature hint derived from problem["tutor_layer"]["expected_setup"] (if present)
-# - ✅ PDF extraction upgrade: PyPDF2 (fast) -> pdfplumber (better for Mathcad/engineering PDFs)
-# - ✅ Debug toggle to show extracted text preview so you can confirm what the parser sees
+# IMPORTANT (for Streamlit Cloud):
+# Create requirements.txt (same folder as this app.py) with:
+# streamlit
+# PyPDF2
+# pdfplumber
+# pymupdf
+# openai
+#
+# If OPENAI_API_KEY is not set in environment/secrets, the app falls back to a local heuristic stub.
 
 import csv
 import json
+import re
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -24,7 +22,13 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import streamlit as st
 
-# Optional PDF extractors
+# ---------- Optional PDF extractors ----------
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except Exception:
+    HAS_PYMUPDF = False
+
 try:
     import PyPDF2  # type: ignore
     HAS_PYPDF2 = True
@@ -36,6 +40,13 @@ try:
     HAS_PDFPLUMBER = True
 except Exception:
     HAS_PDFPLUMBER = False
+
+# ---------- Optional OpenAI client ----------
+try:
+    from openai import OpenAI  # type: ignore
+    HAS_OPENAI = True
+except Exception:
+    HAS_OPENAI = False
 
 
 # -----------------------------
@@ -73,7 +84,7 @@ def parse_float(s: str) -> Optional[float]:
 def within_tolerance(student_val: float, answer_val: float, tol_type: str, tol_value: float) -> bool:
     tol_type = (tol_type or "").lower().strip()
     if tol_type == "relative":
-        return abs(student_val - answer_val) <= tol_value * abs(answer_val)
+        return abs(student_val - answer_val) <= tol_value * max(abs(answer_val), 1e-12)
     return abs(student_val - answer_val) <= tol_value
 
 
@@ -90,13 +101,6 @@ def ai_feedback_key(attempt_id: str, part_id: str) -> str:
 
 
 def extract_units_from_expected_output(expected_raw: Any) -> str:
-    """
-    Supports:
-      - dict: {"name": "...", "units": "..."}
-      - str:  "kmol/hr" (treat as units)
-      - list: [{"name": "...", "units": "..."}] (use first dict's units)
-      - anything else: unitless
-    """
     if isinstance(expected_raw, dict):
         return (expected_raw.get("units") or "").strip()
     if isinstance(expected_raw, str):
@@ -106,23 +110,10 @@ def extract_units_from_expected_output(expected_raw: Any) -> str:
     return ""
 
 
-# ✅ FIXED: readability heuristic (not overly strict)
+# If you see extracted text in debug, but "unreadable" is still showing,
+# this is the least-confusing definition:
 def compute_readable(extracted_text: str) -> bool:
-    """
-    Better Phase-1 readability heuristic for typed PDFs:
-    - must have enough text
-    - must have enough letters/digits (not just whitespace)
-    - equation marker helps, but not required
-    """
-    t = (extracted_text or "").strip()
-    if len(t) < 30:
-        return False
-
-    alpha = sum(1 for c in t if c.isalpha())
-    alnum = sum(1 for c in t if c.isalnum())
-    eq = "=" in t
-
-    return eq or (alpha >= 15 and (alnum / max(len(t), 1)) > 0.20)
+    return len((extracted_text or "").strip()) >= 30
 
 
 # -----------------------------
@@ -244,7 +235,6 @@ def db_init_and_migrate() -> None:
             );
             """
         )
-
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploads (
@@ -373,38 +363,37 @@ def get_latest_upload_text(attempt_id: str, part_id: str) -> Tuple[str, bool]:
 
 
 # -----------------------------
-# PDF extraction (multi-pass)
+# PDF extraction (3-pass)
 # -----------------------------
 def try_extract_pdf_text(pdf_bytes: bytes) -> str:
-    """
-    Multi-pass extractor:
-    - Pass 1: PyPDF2 (fast)
-    - Pass 2: pdfplumber/pdfminer (often better for Mathcad/engineering PDFs)
-    """
-    # Pass 1: PyPDF2
+    # Pass 1: PyMuPDF
     try:
-        if HAS_PYPDF2:
-            # PyPDF2 can accept bytes-like in some versions; wrap in BytesIO for safety
-            import io
-            reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))  # type: ignore
-            chunks = []
-            for page in reader.pages:
-                chunks.append(page.extract_text() or "")
-            text = "\n".join(chunks).strip()
+        if HAS_PYMUPDF:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            text = "\n".join(page.get_text("text") for page in doc).strip()
             if len(text) >= 30:
                 return text
     except Exception:
         pass
 
-    # Pass 2: pdfplumber
+    # Pass 2: PyPDF2
+    try:
+        if HAS_PYPDF2:
+            import io
+            reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))  # type: ignore
+            text = "\n".join((p.extract_text() or "") for p in reader.pages).strip()
+            if len(text) >= 30:
+                return text
+    except Exception:
+        pass
+
+    # Pass 3: pdfplumber
     try:
         if HAS_PDFPLUMBER:
             import io
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:  # type: ignore
-                chunks = []
-                for page in pdf.pages:
-                    chunks.append(page.extract_text() or "")
-                return "\n".join(chunks).strip()
+                text = "\n".join((page.extract_text() or "") for page in pdf.pages).strip()
+                return text
     except Exception:
         pass
 
@@ -465,19 +454,34 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
 
 
 # -----------------------------
-# AI feedback (stub)
+# AI: prompt rules + schema + leak filter
 # -----------------------------
-def ai_feedback_stub(problem: Dict[str, Any], part_id: str, work_text: str) -> Dict[str, Any]:
-    work = (work_text or "").strip()
-    has_eq = "=" in work
+AI_RULES = """You are a homework coach. Diagnose the student's approach and provide targeted guidance WITHOUT giving away final numeric answers or a complete worked solution.
+
+Hard restrictions:
+1) DO NOT compute or reveal the final numeric answer(s) for any asked-for unknown (e.g., V, L, x_B, etc.).
+2) DO NOT provide a full step-by-step worked solution. You may show at most ONE equation transformation or ONE algebra step if needed for clarity.
+3) DO NOT confirm final numeric answers even if the student wrote them. Confirm setup/logic instead.
+4) Use ONLY information from the problem statement, and the student's work text. Do not invent values.
+
+What you SHOULD do:
+- Identify missing/incorrect equations, wrong variable meanings (z vs x vs y), sign conventions, unit handling, algebra issues.
+- Cite small evidence quotes from the student's text.
+- Provide 1–2 next steps and 1 hint.
+- Ask 1–2 clarifying questions if the work is unclear.
+
+Output requirements:
+- Output MUST be valid JSON matching the schema fields exactly.
+- Return JSON only.
+"""
+
+def expected_schema_skeleton(part_id: str) -> Dict[str, Any]:
     return {
         "schema_version": "1.0",
         "mode": "student",
         "part_id": part_id,
-        "confidence": 0.55 if len(work) > 80 else 0.35,
-        "evidence_quotes": [
-            {"quote": ("=" if has_eq else (work[:80] if work else "")), "reason": "Detected equation marker or snippet from your work."}
-        ] if work else [],
+        "confidence": 0.0,
+        "evidence_quotes": [],
         "detected_work": {
             "has_overall_balance": None,
             "has_component_balance": None,
@@ -485,33 +489,195 @@ def ai_feedback_stub(problem: Dict[str, Any], part_id: str, work_text: str) -> D
             "uses_correct_compositions": None,
             "units_handling": "unknown",
             "algebra_progress": "unknown",
-            "notes": ["Stub feedback: replace ai_feedback_stub() with a real model call."]
+            "notes": []
         },
-        "issues": [
-            {
-                "category": "missing_info" if len(work) < 40 else "setup",
-                "severity": "high" if len(work) < 40 else "medium",
-                "diagnosis": "Not enough readable work text to diagnose confidently." if len(work) < 40 else "I can see some work, but you need to clearly show the balances you used.",
-                "why_it_matters": "Without seeing the balance equations, feedback can’t be specific.",
-                "how_to_fix": "Paste your overall + component balances into the fallback form, then request feedback again."
-            }
-        ],
-        "next_steps": [
-            {"action": "Write the overall balance first (In = Out).", "why": "It anchors the unknown flow rates."},
-            {"action": "Write the component balance using the given compositions.", "why": "This gives the second independent equation."}
-        ],
-        "hints": [
-            {"level": 1, "hint": "Show the two independent equations you used before substituting numbers.", "gives_final_answer": False}
-        ],
-        "questions_for_student": [
-            "What two equations did you use to solve for the unknowns?"
-        ] if len(work) < 40 else [],
+        "issues": [],
+        "next_steps": [],
+        "hints": [],
+        "questions_for_student": [],
         "safety": {
             "revealed_final_numeric_answer": False,
             "revealed_full_solution": False,
             "redactions_applied": False
         }
     }
+
+
+def extract_numbers(text: str) -> List[float]:
+    # pulls numbers like -1.23, 4, 5.6e-3
+    nums = []
+    for m in re.finditer(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", text or ""):
+        v = parse_float(m.group(0))
+        if v is not None:
+            nums.append(v)
+    return nums
+
+
+def redact_if_leaks_answer(feedback: Dict[str, Any], problem_id: str, part_id: str, answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> Dict[str, Any]:
+    """
+    If model output includes a number close to the official answer, redact hint text (belt + suspenders).
+    """
+    row = answer_key.get((problem_id, part_id))
+    if not row:
+        return feedback
+
+    ans_val = parse_float(row.get("answer_value", ""))
+    tol_val = parse_float(row.get("tolerance_value", ""))
+    tol_type = row.get("tolerance_type", "absolute")
+    if ans_val is None or tol_val is None:
+        return feedback
+
+    text_blob = json.dumps(feedback, ensure_ascii=False)
+    for n in extract_numbers(text_blob):
+        if within_tolerance(n, ans_val, tol_type, tol_val):
+            # redact hints + any issue text that contains the number via a broad reset
+            feedback["hints"] = [{
+                "level": 1,
+                "hint": "I can’t share the final number here — but double-check your overall vs component balance setup and your algebra signs.",
+                "gives_final_answer": False
+            }]
+            safety = feedback.get("safety") or {}
+            safety["redactions_applied"] = True
+            safety["revealed_final_numeric_answer"] = True
+            feedback["safety"] = safety
+            return feedback
+    return feedback
+
+
+def call_ai_feedback_openended(
+    problem_id: str,
+    part_id: str,
+    problem_statement: str,
+    part_prompt: str,
+    work_text: str,
+    answer_key: Dict[Tuple[str, str], Dict[str, str]],
+) -> Dict[str, Any]:
+    """
+    Uses OpenAI if available + key set; otherwise uses a local heuristic stub.
+    Always returns schema-shaped dict.
+    """
+    if not work_text or len(work_text.strip()) < 40:
+        fb = expected_schema_skeleton(part_id)
+        fb["issues"] = [{
+            "category": "missing_info",
+            "severity": "high",
+            "diagnosis": "Not enough readable work text was provided to analyze.",
+            "why_it_matters": "Without your balance equations/steps, feedback can’t be specific.",
+            "how_to_fix": "Upload a typed PDF or paste your equations into the fallback form."
+        }]
+        fb["hints"] = [{"level": 1, "hint": "Start by writing the overall balance, then the component balance.", "gives_final_answer": False}]
+        fb["confidence"] = 0.2
+        return fb
+
+    # OpenAI path
+    if HAS_OPENAI and st.secrets.get("OPENAI_API_KEY", None):
+        try:
+            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+            user_prompt = f"""
+Problem statement:
+{problem_statement}
+
+Part:
+part_id={part_id}
+prompt={part_prompt}
+
+Student work text:
+{work_text}
+
+Return JSON only.
+"""
+            # Use a compact, safe model by default; you can change this anytime.
+            resp = client.chat.completions.create(
+                model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
+                messages=[
+                    {"role": "system", "content": AI_RULES},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            fb = json.loads(content)
+
+            # Minimal schema hardening
+            if not isinstance(fb, dict) or fb.get("schema_version") != "1.0":
+                raise ValueError("Model returned non-schema output.")
+
+            fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
+            return fb
+        except Exception:
+            # fall back to stub below
+            pass
+
+    # Local heuristic fallback (still useful if key isn't configured)
+    return ai_feedback_stub_openended(problem_id, part_id, problem_statement, part_prompt, work_text, answer_key)
+
+
+def ai_feedback_stub_openended(
+    problem_id: str,
+    part_id: str,
+    problem_statement: str,
+    part_prompt: str,
+    work_text: str,
+    answer_key: Dict[Tuple[str, str], Dict[str, str]],
+) -> Dict[str, Any]:
+    """
+    Not "predetermined hints" for every case—just a lightweight detector until OpenAI is wired.
+    """
+    t = (work_text or "").strip()
+    low = t.lower()
+
+    has_overall = ("=" in t) and ("f" in low) and ("l" in low) and ("v" in low)
+    has_component = ("=" in t) and ("z" in low) and ("x" in low or "y" in low)
+
+    issues = []
+    if not has_overall:
+        issues.append({
+            "category": "setup",
+            "severity": "high",
+            "diagnosis": "I didn’t clearly see an overall balance relating the inlet and outlet flow rates.",
+            "why_it_matters": "You need an overall balance to connect the unknown flow rates.",
+            "how_to_fix": "Write the overall balance first using a clear In = Out form."
+        })
+    if not has_component:
+        issues.append({
+            "category": "setup",
+            "severity": "high",
+            "diagnosis": "I didn’t clearly see a component balance using composition variables (z, x, y).",
+            "why_it_matters": "The component balance gives the second independent equation.",
+            "how_to_fix": "Write the component balance (e.g., F·zA = L·xA + V·yA)."
+        })
+
+    # Try to spot common sign mistakes without solving
+    if "f = l - v" in low or "f=l-v" in low or "f = l – v" in low or "f = l − v" in low:
+        issues.append({
+            "category": "concept",
+            "severity": "high",
+            "diagnosis": "Your overall balance appears to subtract an outlet stream (e.g., F = L − V).",
+            "why_it_matters": "For one inlet and two outlet streams at steady state, outlet flows add.",
+            "how_to_fix": "Re-write the overall balance so both outlet streams contribute positively."
+        })
+
+    fb = expected_schema_skeleton(part_id)
+    fb["confidence"] = 0.65 if (has_overall or has_component) else 0.35
+    fb["evidence_quotes"] = [
+        {"quote": t[:220], "reason": "Snippet from the work text that was analyzed."}
+    ]
+    fb["detected_work"]["has_overall_balance"] = has_overall
+    fb["detected_work"]["has_component_balance"] = has_component
+    fb["issues"] = issues if issues else [{
+        "category": "setup",
+        "severity": "low",
+        "diagnosis": "Your setup looks reasonably complete. Next, check algebra/signs carefully as you isolate the unknown.",
+        "why_it_matters": "Small sign errors can change the solved flow rates.",
+        "how_to_fix": "Re-derive after substitution and ensure the unknown is isolated cleanly."
+    }]
+    fb["next_steps"] = [
+        {"action": "State the overall balance clearly (In = Out).", "why": "It anchors the unknown flows."},
+        {"action": "State the component balance using z, x, and y.", "why": "It provides the second equation."}
+    ]
+    fb["hints"] = [{"level": 1, "hint": "If you substitute, do it after both equations are written cleanly and track signs carefully.", "gives_final_answer": False}]
+    fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
+    return fb
 
 
 # -----------------------------
@@ -526,8 +692,8 @@ def init_session_state() -> None:
     st.session_state.setdefault("active_incorrect_parts", [])
     st.session_state.setdefault("active_results", {})
 
-    # Debug toggle for extraction preview
     st.session_state.setdefault("debug_pdf_extract", False)
+    st.session_state.setdefault("debug_ai_input", False)
 
 
 # -----------------------------
@@ -664,7 +830,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     for p in parts:
         part_id = str(p.get("part_id", "")).strip() or "?"
         prompt = p.get("prompt", "")
-
         units = extract_units_from_expected_output(p.get("expected_output", None))
 
         st.markdown(f"### Part ({part_id})")
@@ -707,18 +872,17 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         incorrect_parts_active = st.session_state.get("active_incorrect_parts") or []
         if attempt_id_active and incorrect_parts_active:
             st.warning("Upload your work for the parts you missed (one PDF per part).")
-            render_per_part_uploads(problem=problem, problem_id=pid, attempt_id=attempt_id_active, incorrect_parts=incorrect_parts_active)
+            render_per_part_uploads(problem=problem, problem_id=pid, attempt_id=attempt_id_active, incorrect_parts=incorrect_parts_active, answer_key=answer_key)
         elif attempt_id_active:
             st.info("All graded parts are correct. No uploads needed.")
 
 
-def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id: str, incorrect_parts: List[str]) -> None:
+def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id: str, incorrect_parts: List[str], answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
-    st.caption("If we can’t read the PDF text, the fallback form becomes required for AI feedback.")
+    st.caption("If we can’t extract enough text from your PDF, the fallback form becomes required for AI feedback.")
 
     parts_map = {str(p.get("part_id", "")).strip(): p for p in (problem.get("parts") or []) if isinstance(p, dict)}
-    tutor_layer = problem.get("tutor_layer") or {}
 
     for part_id in incorrect_parts:
         st.markdown(f"### Part ({part_id}) — Upload")
@@ -744,26 +908,26 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.session_state[state_key] = True
             st.success("✅ Upload saved. (See sidebar → Uploaded files)")
 
-        # ✅ FIXED: use explicit None check
+        # IMPORTANT: explicit None check so we don't overwrite readability right after upload
         if uploaded is None:
             extracted_text, readable = get_latest_upload_text(attempt_id, part_id)
 
-        # Debug preview (helps with Mathcad PDFs)
         if st.session_state.get("debug_pdf_extract", False) and st.session_state.get(state_key):
-            st.caption(f"DEBUG: extracted_text length = {len(extracted_text)} | readable={readable} | PyPDF2={HAS_PYPDF2} | pdfplumber={HAS_PDFPLUMBER}")
-            st.code((extracted_text[:700] if extracted_text else "<EMPTY>"), language="text")
+            st.caption(
+                f"DEBUG PDF: len={len(extracted_text)} | readable={readable} | "
+                f"PyMuPDF={HAS_PYMUPDF} PyPDF2={HAS_PYPDF2} pdfplumber={HAS_PDFPLUMBER}"
+            )
+            st.code((extracted_text[:900] if extracted_text else "<EMPTY>"), language="text")
 
         if st.session_state.get(state_key):
-            st.caption(f"PDF text status: {'✅ readable' if readable else '⚠️ unreadable (use fallback)'}")
-            if (not HAS_PDFPLUMBER) and (not readable):
-                st.info("Tip: installing `pdfplumber` often fixes “digital but unreadable” Mathcad PDFs.")
+            st.caption(f"PDF text status: {'✅ readable' if readable else '⚠️ not enough extractable text (use fallback)'}")
         else:
             st.caption("No PDF uploaded yet for this part.")
 
         fallback_expanded = bool(st.session_state.get(state_key) and not readable)
 
         if st.session_state.get(state_key) and not readable:
-            st.warning("⚠️ We couldn’t read typed text from your PDF. Please fill out the fallback form below for AI feedback.")
+            st.warning("⚠️ We couldn’t extract enough readable text from your PDF. Please fill out the fallback form below for AI feedback.")
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=fallback_expanded):
             balance = st.text_area(
@@ -790,6 +954,10 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             work_text = ("\n\n".join([fallback_text, fallback_notes])).strip()
             source_label = "Fallback form text"
 
+        if st.session_state.get("debug_ai_input", False) and st.session_state.get(state_key):
+            st.caption(f"DEBUG AI INPUT: source={source_label} | len={len(work_text)}")
+            st.code((work_text[:900] if work_text else "<EMPTY>"), language="text")
+
         can_request_ai = len(work_text) >= 40
 
         cols = st.columns([1, 2])
@@ -797,23 +965,22 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             get_fb = st.button("Get AI feedback", key=f"ai_btn_{attempt_id}_{part_id}", disabled=not can_request_ai)
         with cols[1]:
             if not can_request_ai:
-                st.info("To get AI feedback: upload a typed PDF **or** fill in the fallback form (at least a couple sentences/equations).")
+                st.info("To get AI feedback: upload a typed PDF **or** fill in the fallback form (a couple sentences/equations).")
             else:
                 st.caption(f"AI will use: **{source_label}**")
 
         if get_fb:
             part_obj = parts_map.get(part_id, {})
             part_prompt = (part_obj.get("prompt") or "")
-            feedback = ai_feedback_stub(
-                problem={
-                    "problem_statement": problem.get("statement", ""),
-                    "tutor_layer": tutor_layer,
-                    "part_prompt": part_prompt,
-                },
+            fb = call_ai_feedback_openended(
+                problem_id=problem_id,
                 part_id=part_id,
+                problem_statement=(problem.get("statement", "") or ""),
+                part_prompt=part_prompt,
                 work_text=work_text,
+                answer_key=answer_key,
             )
-            st.session_state[ai_feedback_key(attempt_id, part_id)] = feedback
+            st.session_state[ai_feedback_key(attempt_id, part_id)] = fb
 
         fb = st.session_state.get(ai_feedback_key(attempt_id, part_id))
         if fb:
@@ -834,7 +1001,19 @@ safe_mkdir(LOGS_DIR)
 db_init_and_migrate()
 
 st.title("MEB Homework Tutor")
-st.caption("Uploads persist across reruns. AI reading uses PDF extracted text when readable, otherwise fallback form.")
+st.caption("Uploads persist across reruns. AI reads extracted text if available; otherwise fallback form.")
+
+# Debug toggles
+st.sidebar.divider()
+st.session_state["debug_pdf_extract"] = st.sidebar.checkbox("Debug PDF extraction", value=st.session_state["debug_pdf_extract"])
+st.session_state["debug_ai_input"] = st.sidebar.checkbox("Debug AI input (show what we send)", value=st.session_state["debug_ai_input"])
+
+# AI status
+st.sidebar.divider()
+if HAS_OPENAI and st.secrets.get("OPENAI_API_KEY", None):
+    st.sidebar.success("AI: OpenAI connected")
+else:
+    st.sidebar.warning("AI: using local stub (set OPENAI_API_KEY in Streamlit secrets to enable real AI)")
 
 try:
     assignments = load_assignments()
@@ -848,10 +1027,6 @@ assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
 render_sidebar_tabs(problem_id)
-
-# Debug toggle in sidebar
-st.sidebar.divider()
-st.session_state["debug_pdf_extract"] = st.sidebar.checkbox("Debug PDF extraction", value=st.session_state.get("debug_pdf_extract", False))
 
 try:
     problem = load_problem(problem_id)
