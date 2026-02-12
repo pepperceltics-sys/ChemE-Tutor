@@ -702,8 +702,6 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             key=f"uploader_{attempt_id}_{part_id}",
         )
 
-        readable = False
-        extracted_text = ""
 
         if uploaded is not None:
             file_bytes = uploaded.getvalue()
