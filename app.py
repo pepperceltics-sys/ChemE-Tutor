@@ -1,15 +1,19 @@
 # app.py
-# MEB Tutor — stable submit + uploads (no disappearing) + unitless-safe + legacy expected_output-safe
+# MEB Tutor — stable submit + uploads + AI-read pipeline (PDF -> fallback -> feedback-ready)
 #
-# Fixes included:
-# 1) Upload UI no longer disappears after you upload:
-#    - We persist the "active attempt" + incorrect parts in st.session_state, so reruns keep the upload section visible.
-# 2) Sidebar "Uploaded files" updates immediately:
-#    - We store uploads in memory (session_state) AND also log to DB/disk.
-# 3) Unitless parts:
-#    - Only show units if they exist (no “Expected units” for unitless).
-# 4) Legacy problem schemas:
-#    - expected_output can be dict OR string OR list-of-dicts (like your MEB_001).
+# ✅ What’s new in this version
+# 1) Uploads table now stores extracted PDF text (extracted_text) + readable flag
+#    - Includes a safe migration (ALTER TABLE) so existing DBs won’t crash.
+# 2) If PDF text is unreadable → fallback form auto-expands + “required” messaging.
+# 3) Adds a per-part “Get AI feedback” button that:
+#    - uses extracted PDF text when readable
+#    - otherwise uses fallback form text
+#    - stores feedback JSON in session_state for display
+#    - (AI call is a stub by default; plug in your model later)
+# 4) Adds a “nomenclature” hint under the problem statement so students know variables to use
+#    - Derived from tutor_layer.expected_setup.unknowns + knowns keys (when present)
+#
+# Note: This keeps the “active submission” persisted so the upload area DOES NOT disappear after reruns.
 
 import csv
 import json
@@ -76,6 +80,10 @@ def mem_store_key(problem_id: str) -> str:
     return f"mem_uploads_{problem_id}"
 
 
+def ai_feedback_key(attempt_id: str, part_id: str) -> str:
+    return f"ai_feedback_{attempt_id}_{part_id}"
+
+
 def extract_units_from_expected_output(expected_raw: Any) -> str:
     """
     Supports:
@@ -91,6 +99,19 @@ def extract_units_from_expected_output(expected_raw: Any) -> str:
     if isinstance(expected_raw, list) and expected_raw and isinstance(expected_raw[0], dict):
         return (expected_raw[0].get("units") or "").strip()
     return ""
+
+
+def compute_readable(extracted_text: str) -> bool:
+    """
+    Phase-1 readability heuristic:
+    - needs some text
+    - ideally contains at least one equation marker or variable marker
+    """
+    t = (extracted_text or "").strip()
+    if len(t) < 30:
+        return False
+    markers = ["=", "F", "V", "L", "z", "x", "y"]
+    return any(m in t for m in markers)
 
 
 # -----------------------------
@@ -171,7 +192,7 @@ def grade_part(
 
 
 # -----------------------------
-# Database (SQLite) logging
+# Database (SQLite) logging + migration
 # -----------------------------
 def db_connect() -> sqlite3.Connection:
     safe_mkdir(LOGS_DIR)
@@ -180,7 +201,13 @@ def db_connect() -> sqlite3.Connection:
     return conn
 
 
-def db_init() -> None:
+def db_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cur = conn.execute(f"PRAGMA table_info({table});")
+    cols = [r[1] for r in cur.fetchall()]  # (cid, name, type, notnull, dflt_value, pk)
+    return column in cols
+
+
+def db_init_and_migrate() -> None:
     safe_mkdir(LOGS_DIR)
     with db_connect() as conn:
         conn.execute(
@@ -206,6 +233,7 @@ def db_init() -> None:
             );
             """
         )
+        # Create uploads table (new installs)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploads (
@@ -214,6 +242,7 @@ def db_init() -> None:
                 part_id TEXT NOT NULL,
                 filename TEXT NOT NULL,
                 stored_path TEXT NOT NULL,
+                extracted_text TEXT,
                 extracted_text_len INTEGER NOT NULL,
                 readable INTEGER NOT NULL,
                 created_utc TEXT NOT NULL,
@@ -221,6 +250,11 @@ def db_init() -> None:
             );
             """
         )
+        # Migrate old uploads table that lacks extracted_text
+        if not db_has_column(conn, "uploads", "extracted_text"):
+            conn.execute("ALTER TABLE uploads ADD COLUMN extracted_text TEXT;")
+        conn.commit()
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS fallback (
@@ -292,11 +326,14 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
         return list(cur.fetchall())
 
 
-def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Tuple[str, str, str, str]]:
+def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Tuple[str, str, str, str, int]]:
+    """
+    Returns rows: (created_utc, attempt_id, part_id, filename, readable)
+    """
     with db_connect() as conn:
         cur = conn.execute(
             """
-            SELECT u.created_utc, u.attempt_id, u.part_id, u.filename
+            SELECT u.created_utc, u.attempt_id, u.part_id, u.filename, u.readable
             FROM uploads u
             JOIN attempts a ON a.attempt_id = u.attempt_id
             WHERE a.problem_id = ?
@@ -306,6 +343,29 @@ def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Tuple[str
             (problem_id, limit),
         )
         return list(cur.fetchall())
+
+
+def get_latest_upload_text(attempt_id: str, part_id: str) -> Tuple[str, bool]:
+    """
+    Returns (extracted_text, readable) for the most recent upload for attempt+part.
+    """
+    with db_connect() as conn:
+        cur = conn.execute(
+            """
+            SELECT extracted_text, readable
+            FROM uploads
+            WHERE attempt_id = ? AND part_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (attempt_id, part_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return "", False
+        extracted_text = (row[0] or "")
+        readable = bool(row[1] == 1)
+        return extracted_text, readable
 
 
 # -----------------------------
@@ -324,7 +384,10 @@ def try_extract_pdf_text(pdf_bytes: bytes) -> str:
         return ""
 
 
-def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> Tuple[bool, int]:
+def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> Tuple[bool, int, str]:
+    """
+    Writes to disk and records in SQLite. Returns (readable, extracted_text_len, extracted_text).
+    """
     safe_mkdir(UPLOADS_DIR)
     part_dir = UPLOADS_DIR / attempt_id / part_id
     safe_mkdir(part_dir)
@@ -333,23 +396,23 @@ def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, fil
     stored_path.write_bytes(file_bytes)
 
     extracted = try_extract_pdf_text(file_bytes)
-    readable = bool(extracted and len(extracted) >= 30)
     extracted_len = len(extracted)
+    readable = compute_readable(extracted)
 
     with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO uploads (attempt_id, part_id, filename, stored_path, extracted_text_len, readable, created_utc)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO uploads (attempt_id, part_id, filename, stored_path, extracted_text, extracted_text_len, readable, created_utc)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (attempt_id, part_id, filename, str(stored_path), extracted_len, int(readable), utc_now_iso()),
+            (attempt_id, part_id, filename, str(stored_path), extracted, extracted_len, int(readable), utc_now_iso()),
         )
         conn.commit()
 
-    return readable, extracted_len
+    return readable, extracted_len, extracted
 
 
-def remember_upload_in_memory(problem_id: str, attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> None:
+def remember_upload_in_memory(problem_id: str, attempt_id: str, part_id: str, filename: str, file_bytes: bytes, readable: bool) -> None:
     key = mem_store_key(problem_id)
     st.session_state.setdefault(key, [])
     st.session_state[key].insert(
@@ -360,6 +423,7 @@ def remember_upload_in_memory(problem_id: str, attempt_id: str, part_id: str, fi
             "part_id": part_id,
             "filename": filename,
             "bytes_len": len(file_bytes),
+            "readable": bool(readable),
         },
     )
 
@@ -374,6 +438,60 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
             (attempt_id, part_id, balance_equations, notes, utc_now_iso()),
         )
         conn.commit()
+
+
+# -----------------------------
+# AI feedback (stub you can replace)
+# -----------------------------
+def ai_feedback_stub(problem: Dict[str, Any], part_id: str, work_text: str) -> Dict[str, Any]:
+    """
+    Replace this with your real model call.
+    For now, returns schema-compliant JSON with a simple diagnosis.
+    """
+    work = (work_text or "").strip()
+    has_eq = "=" in work
+    return {
+        "schema_version": "1.0",
+        "mode": "student",
+        "part_id": part_id,
+        "confidence": 0.55 if len(work) > 80 else 0.35,
+        "evidence_quotes": [
+            {"quote": ("=" if has_eq else (work[:80] if work else "")), "reason": "Detected equation marker or snippet from your work."}
+        ] if work else [],
+        "detected_work": {
+            "has_overall_balance": None,
+            "has_component_balance": None,
+            "uses_correct_symbols": None,
+            "uses_correct_compositions": None,
+            "units_handling": "unknown",
+            "algebra_progress": "unknown",
+            "notes": ["Stub feedback: plug in real model call next."]
+        },
+        "issues": [
+            {
+                "category": "missing_info" if len(work) < 40 else "setup",
+                "severity": "high" if len(work) < 40 else "medium",
+                "diagnosis": "Not enough readable work text to diagnose confidently." if len(work) < 40 else "I can see some work, but I need you to clearly show the balances you used.",
+                "why_it_matters": "Without seeing the balance equations, feedback can’t be specific.",
+                "how_to_fix": "Paste your overall + component balances into the fallback form, then request feedback again."
+            }
+        ],
+        "next_steps": [
+            {"action": "Write the overall balance first (In = Out).", "why": "It anchors the unknown flow rates."},
+            {"action": "Write the component balance using the given compositions.", "why": "This gives the second independent equation."}
+        ],
+        "hints": [
+            {"level": 1, "hint": "Show the two independent equations you used before substituting numbers.", "gives_final_answer": False}
+        ],
+        "questions_for_student": [
+            "What two equations did you use to solve for the unknowns?"
+        ] if len(work) < 40 else [],
+        "safety": {
+            "revealed_final_numeric_answer": False,
+            "revealed_full_solution": False,
+            "redactions_applied": False
+        }
+    }
 
 
 # -----------------------------
@@ -442,14 +560,15 @@ def render_sidebar_tabs(problem_id: str) -> None:
                 st.caption(f"Attempt ID: {attempt_id}")
 
     with tab_uploads:
-        st.subheader("Uploads (updates immediately)")
+        st.subheader("Uploads")
 
         # In-memory (instant, this browser session)
         mem_uploads = st.session_state.get(mem_store_key(problem_id), [])
         if mem_uploads:
             st.caption("From this session (in memory):")
             for u in mem_uploads[:25]:
-                st.write(f"📎 **{u['filename']}** — Part ({u['part_id']}), Attempt {u['attempt_id'][:8]}")
+                badge = "✅" if u.get("readable") else "⚠️"
+                st.write(f"{badge} **{u['filename']}** — Part ({u['part_id']}), Attempt {u['attempt_id'][:8]}")
                 st.caption(f"{u['created_utc']} • size={u['bytes_len']} bytes")
         else:
             st.caption("No in-memory uploads yet for this problem (this session).")
@@ -460,11 +579,45 @@ def render_sidebar_tabs(problem_id: str) -> None:
         db_uploads = list_uploads_for_problem(problem_id, limit=25)
         if db_uploads:
             st.caption("From database (saved to disk + logged):")
-            for created_utc, attempt_id, part_id, filename in db_uploads:
-                st.write(f"🗂️ **{filename}** — Part ({part_id}), Attempt {attempt_id[:8]}")
+            for created_utc, attempt_id, part_id, filename, readable in db_uploads:
+                badge = "✅" if readable == 1 else "⚠️"
+                st.write(f"{badge} **{filename}** — Part ({part_id}), Attempt {attempt_id[:8]}")
                 st.caption(f"{created_utc}")
         else:
             st.caption("No database uploads yet for this problem.")
+
+
+# -----------------------------
+# Nomenclature helper (UI)
+# -----------------------------
+def render_nomenclature_hint(problem: Dict[str, Any]) -> None:
+    tutor = problem.get("tutor_layer") or {}
+    setup = tutor.get("expected_setup") or {}
+    knowns = setup.get("knowns") or {}
+    unknowns = setup.get("unknowns") or []
+
+    symbols: List[str] = []
+    # Unknown symbols
+    if isinstance(unknowns, list):
+        for u in unknowns:
+            if isinstance(u, dict) and u.get("symbol"):
+                symbols.append(str(u["symbol"]))
+    # Known symbol keys (like F, z_A, y_A, x_A)
+    if isinstance(knowns, dict):
+        for k in knowns.keys():
+            symbols.append(str(k))
+
+    # De-dupe, keep short
+    symbols = [s for s in symbols if s]
+    seen = set()
+    symbols_unique = []
+    for s in symbols:
+        if s not in seen:
+            seen.add(s)
+            symbols_unique.append(s)
+
+    if symbols_unique:
+        st.info("**Nomenclature to use:** " + ", ".join(symbols_unique))
 
 
 # -----------------------------
@@ -479,6 +632,9 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     st.markdown(f"**Problem ID:** `{pid}`")
     if statement:
         st.markdown(statement.replace("\n", "  \n"))
+
+    # ✅ Nomenclature hint (so students match variable naming)
+    render_nomenclature_hint(problem)
 
     parts = problem.get("parts", [])
     if not parts:
@@ -504,9 +660,7 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
 
     submitted = st.button("Submit", key=f"submit_{pid}")
 
-    # -------------------------
-    # If user just submitted, grade + store "active attempt" state
-    # -------------------------
+    # If user just submitted, grade + store active attempt state
     if submitted:
         attempt_id = log_attempt(assignment, pid)
 
@@ -528,63 +682,72 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
 
         incorrect_parts = [part_id for part_id, (ok, _msg) in results.items() if ok is False]
 
-        # ✅ persist across reruns (this is the key fix)
+        # ✅ persist across reruns
         st.session_state["active_problem_id"] = pid
         st.session_state["active_attempt_id"] = attempt_id
         st.session_state["active_incorrect_parts"] = incorrect_parts
         st.session_state["active_results"] = results
 
-    # -------------------------
     # Always render uploads/results if there is an active attempt for this problem
-    # (prevents “unsubmitted” after upload rerun)
-    # -------------------------
     if st.session_state.get("active_problem_id") == pid:
         attempt_id_active = st.session_state.get("active_attempt_id")
         incorrect_parts_active = st.session_state.get("active_incorrect_parts") or []
-
         if attempt_id_active and incorrect_parts_active:
             st.warning("Upload your work for the parts you missed (one PDF per part).")
-            render_per_part_uploads(problem_id=pid, attempt_id=attempt_id_active, incorrect_parts=incorrect_parts_active)
+            render_per_part_uploads(problem=problem, problem_id=pid, attempt_id=attempt_id_active, incorrect_parts=incorrect_parts_active)
         elif attempt_id_active:
             st.info("All graded parts are correct. No uploads needed.")
 
 
-def render_per_part_uploads(problem_id: str, attempt_id: str, incorrect_parts: List[str]) -> None:
+def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id: str, incorrect_parts: List[str]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
-    st.caption("Uploads are stored in memory immediately and listed in the sidebar → Uploaded files.")
+    st.caption("If we can’t read the PDF text, the fallback form becomes required for AI feedback.")
+
+    parts_map = {str(p.get("part_id", "")).strip(): p for p in (problem.get("parts") or []) if isinstance(p, dict)}
+    tutor_layer = problem.get("tutor_layer") or {}
 
     for part_id in incorrect_parts:
         st.markdown(f"### Part ({part_id}) — Upload")
 
         state_key = upload_state_key(attempt_id, part_id)
 
-        if st.session_state.get(state_key) is True:
-            st.success("✅ Upload saved. Check the sidebar → Uploaded files.")
+        uploaded = st.file_uploader(
+            f"Upload PDF for Part ({part_id})",
+            type=["pdf"],
+            key=f"uploader_{attempt_id}_{part_id}",
+        )
+
+        readable = False
+        extracted_text = ""
+
+        if uploaded is not None:
+            file_bytes = uploaded.getvalue()
+            filename = uploaded.name
+
+            readable, _extracted_len, extracted_text = save_upload_to_disk_and_db(attempt_id, part_id, filename, file_bytes)
+            remember_upload_in_memory(problem_id, attempt_id, part_id, filename, file_bytes, readable)
+
+            st.session_state[state_key] = True
+            st.success("✅ Upload saved. (See sidebar → Uploaded files)")
+
+        # If there was no new upload this rerun, read last known upload status/text from DB (if any)
+        if not uploaded:
+            extracted_text, readable = get_latest_upload_text(attempt_id, part_id)
+
+        # Status line
+        if st.session_state.get(state_key):
+            st.caption(f"PDF text status: {'✅ readable' if readable else '⚠️ unreadable (use fallback)'}")
         else:
-            uploaded = st.file_uploader(
-                f"Upload PDF for Part ({part_id})",
-                type=["pdf"],
-                key=f"uploader_{attempt_id}_{part_id}",
-            )
+            st.caption("No PDF uploaded yet for this part.")
 
-            if uploaded is not None:
-                file_bytes = uploaded.getvalue()
-                filename = uploaded.name
+        # Fallback UX (auto-expand if unreadable)
+        fallback_expanded = bool(st.session_state.get(state_key) and not readable)
 
-                # 1) Save in memory (instant sidebar update)
-                remember_upload_in_memory(problem_id, attempt_id, part_id, filename, file_bytes)
+        if st.session_state.get(state_key) and not readable:
+            st.warning("⚠️ We couldn’t read typed text from your PDF (often scanned/handwritten). Please fill out the fallback form below for AI feedback.")
 
-                # 2) Save to disk + DB (audit trail)
-                readable, _extracted_len = save_upload_to_disk_and_db(attempt_id, part_id, filename, file_bytes)
-
-                st.session_state[state_key] = True
-                st.success("✅ Upload saved. Check the sidebar → Uploaded files.")
-                if not readable:
-                    st.warning("⚠️ We could not confidently read this PDF. Please complete the fallback form below.")
-                # No forced st.rerun() — upload already triggers rerun; and active attempt state keeps UI visible.
-
-        with st.expander(f"Fallback form for Part ({part_id})", expanded=False):
+        with st.expander(f"Fallback form for Part ({part_id})", expanded=fallback_expanded):
             balance = st.text_area(
                 "Paste the balance(s)/equation(s) you used (text)",
                 height=120,
@@ -597,7 +760,51 @@ def render_per_part_uploads(problem_id: str, attempt_id: str, incorrect_parts: L
             )
             if st.button("Save fallback info", key=f"fb_save_{attempt_id}_{part_id}"):
                 save_fallback(attempt_id, part_id, balance, notes)
-                st.success("✅ Additional information saved.")
+                st.success("✅ Fallback information saved.")
+
+        # Build work_text for AI (PDF text if readable, else fallback)
+        fallback_text = (st.session_state.get(f"fb_balance_{attempt_id}_{part_id}", "") or "").strip()
+        fallback_notes = (st.session_state.get(f"fb_notes_{attempt_id}_{part_id}", "") or "").strip()
+
+        if readable and extracted_text.strip():
+            work_text = extracted_text.strip()
+            source_label = "PDF extracted text"
+        else:
+            work_text = ("\n\n".join([fallback_text, fallback_notes])).strip()
+            source_label = "Fallback form text"
+
+        # AI feedback button (enabled only if there is enough text)
+        can_request_ai = len(work_text) >= 40
+
+        cols = st.columns([1, 2])
+        with cols[0]:
+            get_fb = st.button("Get AI feedback", key=f"ai_btn_{attempt_id}_{part_id}", disabled=not can_request_ai)
+        with cols[1]:
+            if not can_request_ai:
+                st.info("To get AI feedback: upload a typed PDF **or** fill in the fallback form (at least a couple sentences/equations).")
+            else:
+                st.caption(f"AI will use: **{source_label}**")
+
+        if get_fb:
+            part_obj = parts_map.get(part_id, {})
+            part_prompt = (part_obj.get("prompt") or "")
+            # Stub call for now
+            feedback = ai_feedback_stub(
+                problem={
+                    "problem_statement": problem.get("statement", ""),
+                    "tutor_layer": tutor_layer,
+                    "part_prompt": part_prompt,
+                },
+                part_id=part_id,
+                work_text=work_text,
+            )
+            st.session_state[ai_feedback_key(attempt_id, part_id)] = feedback
+
+        # Display feedback if present
+        fb = st.session_state.get(ai_feedback_key(attempt_id, part_id))
+        if fb:
+            st.subheader("AI feedback")
+            st.json(fb)
 
 
 # -----------------------------
@@ -610,10 +817,10 @@ safe_mkdir(DATA_DIR)
 safe_mkdir(PROBLEMS_DIR)
 safe_mkdir(UPLOADS_DIR)
 safe_mkdir(LOGS_DIR)
-db_init()
+db_init_and_migrate()
 
 st.title("MEB Homework Tutor")
-st.caption("Stable submit + per-part uploads + sidebar uploads list. Unitless + legacy expected_output supported.")
+st.caption("Uploads persist across reruns. AI reading uses PDF extracted text when readable, otherwise fallback form.")
 
 # Load assignments
 try:
