@@ -4,13 +4,15 @@
 # ✅ Includes (merged):
 # - Persisted "active attempt" so uploads/results don't disappear on rerun
 # - Uploads saved to disk + SQLite; sidebar shows uploaded files
-# - Uploads also tracked in session memory (for instant sidebar updates)
+# - Uploads also tracked in session memory (instant sidebar updates)
 # - Stores extracted PDF text in DB (with safe migration)
-# - Readability detection (FIXED: not everything becomes unreadable)
+# - Readability detection (fixed)
 # - Fallback form auto-expands when PDF is unreadable
 # - “Get AI feedback” per part (stubbed; replace with real model call)
 # - Unitless + legacy expected_output support (dict / str / list-of-dicts)
 # - Nomenclature hint derived from problem["tutor_layer"]["expected_setup"] (if present)
+# - ✅ PDF extraction upgrade: PyPDF2 (fast) -> pdfplumber (better for Mathcad/engineering PDFs)
+# - ✅ Debug toggle to show extracted text preview so you can confirm what the parser sees
 
 import csv
 import json
@@ -22,12 +24,18 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import streamlit as st
 
-# Optional typed-PDF extraction
+# Optional PDF extractors
 try:
     import PyPDF2  # type: ignore
     HAS_PYPDF2 = True
 except Exception:
     HAS_PYPDF2 = False
+
+try:
+    import pdfplumber  # type: ignore
+    HAS_PDFPLUMBER = True
+except Exception:
+    HAS_PDFPLUMBER = False
 
 
 # -----------------------------
@@ -253,7 +261,6 @@ def db_init_and_migrate() -> None:
             );
             """
         )
-        # migrate older DBs
         if not db_has_column(conn, "uploads", "extracted_text"):
             conn.execute("ALTER TABLE uploads ADD COLUMN extracted_text TEXT;")
         conn.commit()
@@ -330,9 +337,6 @@ def get_attempt_parts(attempt_id: str) -> List[Tuple[str, str, Optional[int], st
 
 
 def list_uploads_for_problem(problem_id: str, limit: int = 50) -> List[Tuple[str, str, str, str, int]]:
-    """
-    Returns rows: (created_utc, attempt_id, part_id, filename, readable)
-    """
     with db_connect() as conn:
         cur = conn.execute(
             """
@@ -369,19 +373,42 @@ def get_latest_upload_text(attempt_id: str, part_id: str) -> Tuple[str, bool]:
 
 
 # -----------------------------
-# Uploads: PDF extraction + disk/db save + MEMORY save
+# PDF extraction (multi-pass)
 # -----------------------------
 def try_extract_pdf_text(pdf_bytes: bytes) -> str:
-    if not HAS_PYPDF2:
-        return ""
+    """
+    Multi-pass extractor:
+    - Pass 1: PyPDF2 (fast)
+    - Pass 2: pdfplumber/pdfminer (often better for Mathcad/engineering PDFs)
+    """
+    # Pass 1: PyPDF2
     try:
-        reader = PyPDF2.PdfReader(pdf_bytes)  # type: ignore
-        chunks = []
-        for page in reader.pages:
-            chunks.append(page.extract_text() or "")
-        return "\n".join(chunks).strip()
+        if HAS_PYPDF2:
+            # PyPDF2 can accept bytes-like in some versions; wrap in BytesIO for safety
+            import io
+            reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))  # type: ignore
+            chunks = []
+            for page in reader.pages:
+                chunks.append(page.extract_text() or "")
+            text = "\n".join(chunks).strip()
+            if len(text) >= 30:
+                return text
     except Exception:
-        return ""
+        pass
+
+    # Pass 2: pdfplumber
+    try:
+        if HAS_PDFPLUMBER:
+            import io
+            with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:  # type: ignore
+                chunks = []
+                for page in pdf.pages:
+                    chunks.append(page.extract_text() or "")
+                return "\n".join(chunks).strip()
+    except Exception:
+        pass
+
+    return ""
 
 
 def save_upload_to_disk_and_db(attempt_id: str, part_id: str, filename: str, file_bytes: bytes) -> Tuple[bool, int, str]:
@@ -494,11 +521,13 @@ def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
 
-    # Persist "submitted state" so reruns keep showing uploads/results
     st.session_state.setdefault("active_problem_id", None)
     st.session_state.setdefault("active_attempt_id", None)
     st.session_state.setdefault("active_incorrect_parts", [])
     st.session_state.setdefault("active_results", {})
+
+    # Debug toggle for extraction preview
+    st.session_state.setdefault("debug_pdf_extract", False)
 
 
 # -----------------------------
@@ -702,6 +731,8 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             key=f"uploader_{attempt_id}_{part_id}",
         )
 
+        readable = False
+        extracted_text = ""
 
         if uploaded is not None:
             file_bytes = uploaded.getvalue()
@@ -713,19 +744,26 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.session_state[state_key] = True
             st.success("✅ Upload saved. (See sidebar → Uploaded files)")
 
-        # ✅ FIXED: do not use `if not uploaded:` — use `uploaded is None`
+        # ✅ FIXED: use explicit None check
         if uploaded is None:
             extracted_text, readable = get_latest_upload_text(attempt_id, part_id)
 
+        # Debug preview (helps with Mathcad PDFs)
+        if st.session_state.get("debug_pdf_extract", False) and st.session_state.get(state_key):
+            st.caption(f"DEBUG: extracted_text length = {len(extracted_text)} | readable={readable} | PyPDF2={HAS_PYPDF2} | pdfplumber={HAS_PDFPLUMBER}")
+            st.code((extracted_text[:700] if extracted_text else "<EMPTY>"), language="text")
+
         if st.session_state.get(state_key):
             st.caption(f"PDF text status: {'✅ readable' if readable else '⚠️ unreadable (use fallback)'}")
+            if (not HAS_PDFPLUMBER) and (not readable):
+                st.info("Tip: installing `pdfplumber` often fixes “digital but unreadable” Mathcad PDFs.")
         else:
             st.caption("No PDF uploaded yet for this part.")
 
         fallback_expanded = bool(st.session_state.get(state_key) and not readable)
 
         if st.session_state.get(state_key) and not readable:
-            st.warning("⚠️ We couldn’t read typed text from your PDF (often scanned/handwritten). Please fill out the fallback form below for AI feedback.")
+            st.warning("⚠️ We couldn’t read typed text from your PDF. Please fill out the fallback form below for AI feedback.")
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=fallback_expanded):
             balance = st.text_area(
@@ -810,6 +848,10 @@ assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
 render_sidebar_tabs(problem_id)
+
+# Debug toggle in sidebar
+st.sidebar.divider()
+st.session_state["debug_pdf_extract"] = st.sidebar.checkbox("Debug PDF extraction", value=st.session_state.get("debug_pdf_extract", False))
 
 try:
     problem = load_problem(problem_id)
