@@ -1,3 +1,5 @@
 streamlit
-pdfplumber
+openai
 PyPDF2
+pdfplumber
+pymupdf
