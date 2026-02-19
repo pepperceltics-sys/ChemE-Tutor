@@ -1,15 +1,16 @@
 # app.py
-# MEB Tutor — uploads + PDF text extraction + open-ended AI feedback (guardrailed)
+# MEB Tutor — uploads + PDF text extraction + OPENAI API feedback (guardrailed + forced JSON)
 #
-# IMPORTANT (for Streamlit Cloud):
-# Create requirements.txt (same folder as this app.py) with:
-# streamlit
-# PyPDF2
-# pdfplumber
-# pymupdf
-# openai
+# Streamlit secrets (local: .streamlit/secrets.toml, cloud: App Settings → Secrets):
+#   OPENAI_API_KEY = "sk-..."
+#   OPENAI_MODEL   = "gpt-4.1-mini"   # optional (can change)
 #
-# If OPENAI_API_KEY is not set in environment/secrets, the app falls back to a local heuristic stub.
+# requirements.txt (repo root, same level as app.py):
+#   streamlit
+#   openai
+#   PyPDF2
+#   pdfplumber
+#   pymupdf
 
 import csv
 import json
@@ -22,7 +23,7 @@ from typing import Any, Dict, Optional, Tuple, List
 
 import streamlit as st
 
-# ---------- Optional PDF extractors ----------
+# ---------- PDF extractors ----------
 try:
     import fitz  # PyMuPDF
     HAS_PYMUPDF = True
@@ -41,7 +42,7 @@ try:
 except Exception:
     HAS_PDFPLUMBER = False
 
-# ---------- Optional OpenAI client ----------
+# ---------- OpenAI ----------
 try:
     from openai import OpenAI  # type: ignore
     HAS_OPENAI = True
@@ -110,8 +111,7 @@ def extract_units_from_expected_output(expected_raw: Any) -> str:
     return ""
 
 
-# If you see extracted text in debug, but "unreadable" is still showing,
-# this is the least-confusing definition:
+# Keep “readable” definition simple and correct:
 def compute_readable(extracted_text: str) -> bool:
     return len((extracted_text or "").strip()) >= 30
 
@@ -136,10 +136,6 @@ def load_problem(problem_id: str) -> dict:
 
 @st.cache_data
 def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
-    """
-    CSV columns required:
-      problem_id, part_id, answer_value, answer_units, tolerance_type, tolerance_value
-    """
     key: Dict[Tuple[str, str], Dict[str, str]] = {}
     if not ANSWER_KEY_FILE.exists():
         return key
@@ -161,7 +157,7 @@ def load_answer_key() -> Dict[Tuple[str, str], Dict[str, str]]:
 
 
 # -----------------------------
-# Grading (unitless-safe)
+# Grading
 # -----------------------------
 def grade_part(
     problem_id: str,
@@ -188,13 +184,11 @@ def grade_part(
     ok = within_tolerance(student_val, ans_val, tol_type, tol_val)
     units_msg = f" Expected units: {ans_units}" if ans_units else ""
 
-    if ok:
-        return True, f"Correct (within {tol_type} tolerance).{units_msg}"
-    return False, f"Incorrect.{units_msg}"
+    return (True, f"Correct (within {tol_type} tolerance).{units_msg}") if ok else (False, f"Incorrect.{units_msg}")
 
 
 # -----------------------------
-# Database (SQLite) logging + migration
+# Database
 # -----------------------------
 def db_connect() -> sqlite3.Connection:
     safe_mkdir(LOGS_DIR)
@@ -235,6 +229,7 @@ def db_init_and_migrate() -> None:
             );
             """
         )
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS uploads (
@@ -454,7 +449,7 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
 
 
 # -----------------------------
-# AI: prompt rules + schema + leak filter
+# OpenAI API: DROP-IN MERGE BLOCK (forced JSON)
 # -----------------------------
 AI_RULES = """You are a homework coach. Diagnose the student's approach and provide targeted guidance WITHOUT giving away final numeric answers or a complete worked solution.
 
@@ -471,41 +466,110 @@ What you SHOULD do:
 - Ask 1–2 clarifying questions if the work is unclear.
 
 Output requirements:
-- Output MUST be valid JSON matching the schema fields exactly.
-- Return JSON only.
+- Output MUST be valid JSON (a single JSON object). Return JSON only.
 """
 
-def expected_schema_skeleton(part_id: str) -> Dict[str, Any]:
-    return {
-        "schema_version": "1.0",
-        "mode": "student",
-        "part_id": part_id,
-        "confidence": 0.0,
-        "evidence_quotes": [],
-        "detected_work": {
-            "has_overall_balance": None,
-            "has_component_balance": None,
-            "uses_correct_symbols": None,
-            "uses_correct_compositions": None,
-            "units_handling": "unknown",
-            "algebra_progress": "unknown",
-            "notes": []
-        },
-        "issues": [],
-        "next_steps": [],
-        "hints": [],
-        "questions_for_student": [],
-        "safety": {
-            "revealed_final_numeric_answer": False,
-            "revealed_full_solution": False,
-            "redactions_applied": False
+def call_openai_feedback_json(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    model_default: str = "gpt-4.1-mini",
+    temperature: float = 0.25,
+    max_output_tokens: int = 900,
+) -> dict:
+    """
+    Calls OpenAI and forces a JSON object response.
+    Returns a dict; if anything fails, returns a schema-shaped error dict.
+    """
+    if not HAS_OPENAI:
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": "?",
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": "OpenAI SDK not installed (pip install openai).",
+                "why_it_matters": "The app can’t call the API.",
+                "how_to_fix": "Add openai to requirements.txt and redeploy/restart."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
         }
-    }
+
+    api_key = st.secrets.get("OPENAI_API_KEY")
+    if not api_key:
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": "?",
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": "OPENAI_API_KEY missing from Streamlit secrets.",
+                "why_it_matters": "The app can’t authenticate to OpenAI.",
+                "how_to_fix": "Add OPENAI_API_KEY to .streamlit/secrets.toml (local) or Cloud Secrets and restart the app."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+        }
+
+    model = st.secrets.get("OPENAI_MODEL", model_default)
+    client = OpenAI(api_key=api_key)
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+            response_format={"type": "json_object"},  # <-- forces valid JSON object
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+
+        content = (resp.choices[0].message.content or "").strip()
+        if not content:
+            raise ValueError("Model returned empty content")
+
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("Model returned non-object JSON")
+
+        return data
+
+    except Exception as e:
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": "?",
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": f"AI call failed: {e}",
+                "why_it_matters": "The API response was missing/invalid or the request failed.",
+                "how_to_fix": "Confirm OPENAI_API_KEY + OPENAI_MODEL, restart the app after changing secrets, and check Streamlit logs."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+        }
 
 
+# -----------------------------
+# Answer leak filter (optional but recommended)
+# -----------------------------
 def extract_numbers(text: str) -> List[float]:
-    # pulls numbers like -1.23, 4, 5.6e-3
-    nums = []
+    nums: List[float] = []
     for m in re.finditer(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", text or ""):
         v = parse_float(m.group(0))
         if v is not None:
@@ -513,10 +577,12 @@ def extract_numbers(text: str) -> List[float]:
     return nums
 
 
-def redact_if_leaks_answer(feedback: Dict[str, Any], problem_id: str, part_id: str, answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> Dict[str, Any]:
-    """
-    If model output includes a number close to the official answer, redact hint text (belt + suspenders).
-    """
+def redact_if_leaks_answer(
+    feedback: Dict[str, Any],
+    problem_id: str,
+    part_id: str,
+    answer_key: Dict[Tuple[str, str], Dict[str, str]],
+) -> Dict[str, Any]:
     row = answer_key.get((problem_id, part_id))
     if not row:
         return feedback
@@ -527,13 +593,12 @@ def redact_if_leaks_answer(feedback: Dict[str, Any], problem_id: str, part_id: s
     if ans_val is None or tol_val is None:
         return feedback
 
-    text_blob = json.dumps(feedback, ensure_ascii=False)
-    for n in extract_numbers(text_blob):
+    blob = json.dumps(feedback, ensure_ascii=False)
+    for n in extract_numbers(blob):
         if within_tolerance(n, ans_val, tol_type, tol_val):
-            # redact hints + any issue text that contains the number via a broad reset
             feedback["hints"] = [{
                 "level": 1,
-                "hint": "I can’t share the final number here — but double-check your overall vs component balance setup and your algebra signs.",
+                "hint": "I can’t share the final number here — focus on checking your balances and algebra signs.",
                 "gives_final_answer": False
             }]
             safety = feedback.get("safety") or {}
@@ -550,10 +615,8 @@ def call_ai_feedback_openended(
     problem_statement: str,
     part_prompt: str,
     work_text: str,
-    answer_key,
-) -> dict:
-
-    # If no usable work text
+    answer_key: Dict[Tuple[str, str], Dict[str, str]],
+) -> Dict[str, Any]:
     if not work_text or len(work_text.strip()) < 40:
         return {
             "schema_version": "1.0",
@@ -570,174 +633,29 @@ def call_ai_feedback_openended(
                 "how_to_fix": "Upload a typed PDF or paste equations into fallback form."
             }],
             "next_steps": [],
-            "hints": [{
-                "level": 1,
-                "hint": "Start by clearly writing the overall and component balances.",
-                "gives_final_answer": False
-            }],
+            "hints": [{"level": 1, "hint": "Start by writing the overall and component balances clearly.", "gives_final_answer": False}],
             "questions_for_student": [],
-            "safety": {
-                "revealed_final_numeric_answer": False,
-                "revealed_full_solution": False,
-                "redactions_applied": False
-            }
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
         }
-
-    # Ensure API key exists
-    if "OPENAI_API_KEY" not in st.secrets:
-        return {
-            "schema_version": "1.0",
-            "mode": "student",
-            "part_id": part_id,
-            "confidence": 0.0,
-            "issues": [{
-                "category": "system",
-                "severity": "high",
-                "diagnosis": "OPENAI_API_KEY not configured.",
-                "why_it_matters": "The app cannot access the AI model.",
-                "how_to_fix": "Add OPENAI_API_KEY to Streamlit secrets."
-            }],
-            "next_steps": [],
-            "hints": [],
-            "questions_for_student": [],
-            "safety": {}
-        }
-
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    model = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
-
-    system_prompt = """
-You are a chemical engineering homework coach.
-
-STRICT RULES:
-1) Do NOT compute or reveal final numeric answers.
-2) Do NOT provide a full worked solution.
-3) Diagnose setup, algebra, unit handling, and conceptual mistakes.
-4) Quote small snippets from the student's work as evidence.
-5) Return ONLY valid JSON matching the required schema.
-
-Be constructive and specific.
-"""
 
     user_prompt = f"""
 Problem Statement:
 {problem_statement}
 
 Part:
-{part_prompt}
+part_id={part_id}
+prompt={part_prompt}
 
-Student Work:
+Student Work Text:
 {work_text}
 
 Return JSON only.
-"""
+""".strip()
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            temperature=0.25,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
-
-        content = response.choices[0].message.content.strip()
-
-        # Parse model JSON
-        feedback = json.loads(content)
-
-        # Enforce schema basics
-        feedback["schema_version"] = "1.0"
-        feedback["part_id"] = part_id
-
-        return feedback
-
-    except Exception as e:
-        return {
-            "schema_version": "1.0",
-            "mode": "student",
-            "part_id": part_id,
-            "confidence": 0.0,
-            "issues": [{
-                "category": "system",
-                "severity": "high",
-                "diagnosis": f"AI call failed: {e}",
-                "why_it_matters": "The API request did not complete successfully.",
-                "how_to_fix": "Check API key, billing status, and model name."
-            }],
-            "next_steps": [],
-            "hints": [],
-            "questions_for_student": [],
-            "safety": {}
-        }
-
-
-
-def ai_feedback_stub_openended(
-    problem_id: str,
-    part_id: str,
-    problem_statement: str,
-    part_prompt: str,
-    work_text: str,
-    answer_key: Dict[Tuple[str, str], Dict[str, str]],
-) -> Dict[str, Any]:
-    """
-    Not "predetermined hints" for every case—just a lightweight detector until OpenAI is wired.
-    """
-    t = (work_text or "").strip()
-    low = t.lower()
-
-    has_overall = ("=" in t) and ("f" in low) and ("l" in low) and ("v" in low)
-    has_component = ("=" in t) and ("z" in low) and ("x" in low or "y" in low)
-
-    issues = []
-    if not has_overall:
-        issues.append({
-            "category": "setup",
-            "severity": "high",
-            "diagnosis": "I didn’t clearly see an overall balance relating the inlet and outlet flow rates.",
-            "why_it_matters": "You need an overall balance to connect the unknown flow rates.",
-            "how_to_fix": "Write the overall balance first using a clear In = Out form."
-        })
-    if not has_component:
-        issues.append({
-            "category": "setup",
-            "severity": "high",
-            "diagnosis": "I didn’t clearly see a component balance using composition variables (z, x, y).",
-            "why_it_matters": "The component balance gives the second independent equation.",
-            "how_to_fix": "Write the component balance (e.g., F·zA = L·xA + V·yA)."
-        })
-
-    # Try to spot common sign mistakes without solving
-    if "f = l - v" in low or "f=l-v" in low or "f = l – v" in low or "f = l − v" in low:
-        issues.append({
-            "category": "concept",
-            "severity": "high",
-            "diagnosis": "Your overall balance appears to subtract an outlet stream (e.g., F = L − V).",
-            "why_it_matters": "For one inlet and two outlet streams at steady state, outlet flows add.",
-            "how_to_fix": "Re-write the overall balance so both outlet streams contribute positively."
-        })
-
-    fb = expected_schema_skeleton(part_id)
-    fb["confidence"] = 0.65 if (has_overall or has_component) else 0.35
-    fb["evidence_quotes"] = [
-        {"quote": t[:220], "reason": "Snippet from the work text that was analyzed."}
-    ]
-    fb["detected_work"]["has_overall_balance"] = has_overall
-    fb["detected_work"]["has_component_balance"] = has_component
-    fb["issues"] = issues if issues else [{
-        "category": "setup",
-        "severity": "low",
-        "diagnosis": "Your setup looks reasonably complete. Next, check algebra/signs carefully as you isolate the unknown.",
-        "why_it_matters": "Small sign errors can change the solved flow rates.",
-        "how_to_fix": "Re-derive after substitution and ensure the unknown is isolated cleanly."
-    }]
-    fb["next_steps"] = [
-        {"action": "State the overall balance clearly (In = Out).", "why": "It anchors the unknown flows."},
-        {"action": "State the component balance using z, x, and y.", "why": "It provides the second equation."}
-    ]
-    fb["hints"] = [{"level": 1, "hint": "If you substitute, do it after both equations are written cleanly and track signs carefully.", "gives_final_answer": False}]
+    fb = call_openai_feedback_json(AI_RULES, user_prompt)
+    if isinstance(fb, dict):
+        fb["schema_version"] = "1.0"
+        fb["part_id"] = part_id
     fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
     return fb
 
@@ -748,18 +666,16 @@ def ai_feedback_stub_openended(
 def init_session_state() -> None:
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
-
     st.session_state.setdefault("active_problem_id", None)
     st.session_state.setdefault("active_attempt_id", None)
     st.session_state.setdefault("active_incorrect_parts", [])
     st.session_state.setdefault("active_results", {})
-
     st.session_state.setdefault("debug_pdf_extract", False)
     st.session_state.setdefault("debug_ai_input", False)
 
 
 # -----------------------------
-# Sidebar navigation + tabs
+# Sidebar
 # -----------------------------
 def render_sidebar(assignments: dict) -> None:
     st.sidebar.title("Navigation")
@@ -778,7 +694,6 @@ def render_sidebar(assignments: dict) -> None:
 
     default_p = pids.index(st.session_state["selected_problem_id"]) if st.session_state["selected_problem_id"] in pids else 0
     st.session_state["selected_problem_id"] = st.sidebar.selectbox("Problem", pids, index=default_p)
-
     st.sidebar.divider()
 
 
@@ -811,7 +726,6 @@ def render_sidebar_tabs(problem_id: str) -> None:
 
     with tab_uploads:
         st.subheader("Uploads")
-
         mem_uploads = st.session_state.get(mem_store_key(problem_id), [])
         if mem_uploads:
             st.caption("From this session (in memory):")
@@ -836,7 +750,7 @@ def render_sidebar_tabs(problem_id: str) -> None:
 
 
 # -----------------------------
-# Nomenclature helper (UI)
+# Nomenclature helper (optional)
 # -----------------------------
 def render_nomenclature_hint(problem: Dict[str, Any]) -> None:
     tutor = problem.get("tutor_layer") or {}
@@ -853,11 +767,9 @@ def render_nomenclature_hint(problem: Dict[str, Any]) -> None:
         for k in knowns.keys():
             symbols.append(str(k))
 
-    symbols = [s for s in symbols if s]
-    seen = set()
-    out = []
+    out, seen = [], set()
     for s in symbols:
-        if s not in seen:
+        if s and s not in seen:
             seen.add(s)
             out.append(s)
 
@@ -866,7 +778,7 @@ def render_nomenclature_hint(problem: Dict[str, Any]) -> None:
 
 
 # -----------------------------
-# Main problem UI
+# Main UI
 # -----------------------------
 def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     pid = problem.get("problem_id", "")
@@ -912,7 +824,6 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
             part_id = str(p.get("part_id", "")).strip() or "?"
             is_correct, msg = grade_part(pid, part_id, responses.get(part_id, ""), answer_key)
             results[part_id] = (is_correct, msg)
-
             log_attempt_part(attempt_id, part_id, responses.get(part_id, ""), is_correct, msg)
 
             if is_correct is None:
@@ -942,13 +853,11 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
 def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id: str, incorrect_parts: List[str], answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
-    st.caption("If we can’t extract enough text from your PDF, the fallback form becomes required for AI feedback.")
 
     parts_map = {str(p.get("part_id", "")).strip(): p for p in (problem.get("parts") or []) if isinstance(p, dict)}
 
     for part_id in incorrect_parts:
         st.markdown(f"### Part ({part_id}) — Upload")
-
         state_key = upload_state_key(attempt_id, part_id)
 
         uploaded = st.file_uploader(
@@ -963,22 +872,17 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
         if uploaded is not None:
             file_bytes = uploaded.getvalue()
             filename = uploaded.name
-
-            readable, _extracted_len, extracted_text = save_upload_to_disk_and_db(attempt_id, part_id, filename, file_bytes)
+            readable, _lenx, extracted_text = save_upload_to_disk_and_db(attempt_id, part_id, filename, file_bytes)
             remember_upload_in_memory(problem_id, attempt_id, part_id, filename, file_bytes, readable)
-
             st.session_state[state_key] = True
             st.success("✅ Upload saved. (See sidebar → Uploaded files)")
 
-        # IMPORTANT: explicit None check so we don't overwrite readability right after upload
+        # IMPORTANT: explicit None check (don’t overwrite right after upload)
         if uploaded is None:
             extracted_text, readable = get_latest_upload_text(attempt_id, part_id)
 
         if st.session_state.get("debug_pdf_extract", False) and st.session_state.get(state_key):
-            st.caption(
-                f"DEBUG PDF: len={len(extracted_text)} | readable={readable} | "
-                f"PyMuPDF={HAS_PYMUPDF} PyPDF2={HAS_PYPDF2} pdfplumber={HAS_PDFPLUMBER}"
-            )
+            st.caption(f"DEBUG PDF: len={len(extracted_text)} | readable={readable}")
             st.code((extracted_text[:900] if extracted_text else "<EMPTY>"), language="text")
 
         if st.session_state.get(state_key):
@@ -987,21 +891,12 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.caption("No PDF uploaded yet for this part.")
 
         fallback_expanded = bool(st.session_state.get(state_key) and not readable)
-
         if st.session_state.get(state_key) and not readable:
-            st.warning("⚠️ We couldn’t extract enough readable text from your PDF. Please fill out the fallback form below for AI feedback.")
+            st.warning("⚠️ We couldn’t extract enough text. Please fill the fallback form for AI feedback.")
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=fallback_expanded):
-            balance = st.text_area(
-                "Paste the balance(s)/equation(s) you used (text)",
-                height=120,
-                key=f"fb_balance_{attempt_id}_{part_id}",
-            )
-            notes = st.text_area(
-                "Notes (what you tried / where you think the mistake is)",
-                height=100,
-                key=f"fb_notes_{attempt_id}_{part_id}",
-            )
+            balance = st.text_area("Paste the balance(s)/equation(s) you used (text)", height=120, key=f"fb_balance_{attempt_id}_{part_id}")
+            notes = st.text_area("Notes (what you tried / where you think the mistake is)", height=100, key=f"fb_notes_{attempt_id}_{part_id}")
             if st.button("Save fallback info", key=f"fb_save_{attempt_id}_{part_id}"):
                 save_fallback(attempt_id, part_id, balance, notes)
                 st.success("✅ Fallback information saved.")
@@ -1026,10 +921,7 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
         with cols[0]:
             get_fb = st.button("Get AI feedback", key=f"ai_btn_{attempt_id}_{part_id}", disabled=not can_request_ai)
         with cols[1]:
-            if not can_request_ai:
-                st.info("To get AI feedback: upload a typed PDF **or** fill in the fallback form (a couple sentences/equations).")
-            else:
-                st.caption(f"AI will use: **{source_label}**")
+            st.caption(f"AI will use: **{source_label}**" if can_request_ai else "Upload a typed PDF or fill fallback (a couple lines/equations).")
 
         if get_fb:
             part_obj = parts_map.get(part_id, {})
@@ -1063,26 +955,18 @@ safe_mkdir(LOGS_DIR)
 db_init_and_migrate()
 
 st.title("MEB Homework Tutor")
-st.caption("Uploads persist across reruns. AI reads extracted text if available; otherwise fallback form.")
 
-# Debug toggles
 st.sidebar.divider()
 st.session_state["debug_pdf_extract"] = st.sidebar.checkbox("Debug PDF extraction", value=st.session_state["debug_pdf_extract"])
 st.session_state["debug_ai_input"] = st.sidebar.checkbox("Debug AI input (show what we send)", value=st.session_state["debug_ai_input"])
 
-# AI status
 st.sidebar.divider()
 if HAS_OPENAI and st.secrets.get("OPENAI_API_KEY", None):
     st.sidebar.success("AI: OpenAI connected")
 else:
-    st.sidebar.warning("AI: using local stub (set OPENAI_API_KEY in Streamlit secrets to enable real AI)")
+    st.sidebar.warning("AI: not connected (set OPENAI_API_KEY in Streamlit secrets)")
 
-try:
-    assignments = load_assignments()
-except Exception as e:
-    st.error(f"Could not load assignments at {ASSIGNMENTS_FILE}.\n\nError: {e}")
-    st.stop()
-
+assignments = load_assignments()
 render_sidebar(assignments)
 
 assignment = st.session_state["selected_assignment"]
@@ -1090,16 +974,7 @@ problem_id = st.session_state["selected_problem_id"]
 
 render_sidebar_tabs(problem_id)
 
-try:
-    problem = load_problem(problem_id)
-except Exception as e:
-    st.error(f"Could not load problem '{problem_id}'.\n\nError: {e}")
-    st.stop()
-
-try:
-    answer_key = load_answer_key()
-except Exception as e:
-    st.warning(f"Answer key exists but could not be loaded: {e}")
-    answer_key = {}
+problem = load_problem(problem_id)
+answer_key = load_answer_key()
 
 render_problem(problem, assignment, answer_key)
