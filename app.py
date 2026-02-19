@@ -550,66 +550,128 @@ def call_ai_feedback_openended(
     problem_statement: str,
     part_prompt: str,
     work_text: str,
-    answer_key: Dict[Tuple[str, str], Dict[str, str]],
-) -> Dict[str, Any]:
-    """
-    Uses OpenAI if available + key set; otherwise uses a local heuristic stub.
-    Always returns schema-shaped dict.
-    """
-    if not work_text or len(work_text.strip()) < 40:
-        fb = expected_schema_skeleton(part_id)
-        fb["issues"] = [{
-            "category": "missing_info",
-            "severity": "high",
-            "diagnosis": "Not enough readable work text was provided to analyze.",
-            "why_it_matters": "Without your balance equations/steps, feedback can’t be specific.",
-            "how_to_fix": "Upload a typed PDF or paste your equations into the fallback form."
-        }]
-        fb["hints"] = [{"level": 1, "hint": "Start by writing the overall balance, then the component balance.", "gives_final_answer": False}]
-        fb["confidence"] = 0.2
-        return fb
+    answer_key,
+) -> dict:
 
-    # OpenAI path
-    if HAS_OPENAI and st.secrets.get("OPENAI_API_KEY", None):
-        try:
-            client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-            user_prompt = f"""
-Problem statement:
+    # If no usable work text
+    if not work_text or len(work_text.strip()) < 40:
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": part_id,
+            "confidence": 0.2,
+            "evidence_quotes": [],
+            "detected_work": {},
+            "issues": [{
+                "category": "missing_info",
+                "severity": "high",
+                "diagnosis": "Not enough readable work text to analyze.",
+                "why_it_matters": "AI needs your equations to give specific feedback.",
+                "how_to_fix": "Upload a typed PDF or paste equations into fallback form."
+            }],
+            "next_steps": [],
+            "hints": [{
+                "level": 1,
+                "hint": "Start by clearly writing the overall and component balances.",
+                "gives_final_answer": False
+            }],
+            "questions_for_student": [],
+            "safety": {
+                "revealed_final_numeric_answer": False,
+                "revealed_full_solution": False,
+                "redactions_applied": False
+            }
+        }
+
+    # Ensure API key exists
+    if "OPENAI_API_KEY" not in st.secrets:
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": part_id,
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": "OPENAI_API_KEY not configured.",
+                "why_it_matters": "The app cannot access the AI model.",
+                "how_to_fix": "Add OPENAI_API_KEY to Streamlit secrets."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {}
+        }
+
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    model = st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+    system_prompt = """
+You are a chemical engineering homework coach.
+
+STRICT RULES:
+1) Do NOT compute or reveal final numeric answers.
+2) Do NOT provide a full worked solution.
+3) Diagnose setup, algebra, unit handling, and conceptual mistakes.
+4) Quote small snippets from the student's work as evidence.
+5) Return ONLY valid JSON matching the required schema.
+
+Be constructive and specific.
+"""
+
+    user_prompt = f"""
+Problem Statement:
 {problem_statement}
 
 Part:
-part_id={part_id}
-prompt={part_prompt}
+{part_prompt}
 
-Student work text:
+Student Work:
 {work_text}
 
 Return JSON only.
 """
-            # Use a compact, safe model by default; you can change this anytime.
-            resp = client.chat.completions.create(
-                model=st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini"),
-                messages=[
-                    {"role": "system", "content": AI_RULES},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=0.2,
-            )
-            content = (resp.choices[0].message.content or "").strip()
-            fb = json.loads(content)
 
-            # Minimal schema hardening
-            if not isinstance(fb, dict) or fb.get("schema_version") != "1.0":
-                raise ValueError("Model returned non-schema output.")
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            temperature=0.25,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
 
-            fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
-            return fb
-        except Exception:
-            # fall back to stub below
-            pass
+        content = response.choices[0].message.content.strip()
 
-    # Local heuristic fallback (still useful if key isn't configured)
-    return ai_feedback_stub_openended(problem_id, part_id, problem_statement, part_prompt, work_text, answer_key)
+        # Parse model JSON
+        feedback = json.loads(content)
+
+        # Enforce schema basics
+        feedback["schema_version"] = "1.0"
+        feedback["part_id"] = part_id
+
+        return feedback
+
+    except Exception as e:
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": part_id,
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": f"AI call failed: {e}",
+                "why_it_matters": "The API request did not complete successfully.",
+                "how_to_fix": "Check API key, billing status, and model name."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {}
+        }
+
 
 
 def ai_feedback_stub_openended(
