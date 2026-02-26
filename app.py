@@ -7,7 +7,7 @@
 #
 # requirements.txt (repo root, same level as app.py):
 #   streamlit
-#   openai>=1.0.0
+#   openai
 #   PyPDF2
 #   pdfplumber
 #   pymupdf
@@ -43,8 +43,6 @@ except Exception:
     HAS_PDFPLUMBER = False
 
 # ---------- OpenAI ----------
-# FIX: Many "AI feedback" errors come from using an older openai package.
-# This app expects openai>=1.0.0 (OpenAI client class + Responses API).
 try:
     from openai import OpenAI  # type: ignore
     HAS_OPENAI = True
@@ -113,6 +111,7 @@ def extract_units_from_expected_output(expected_raw: Any) -> str:
     return ""
 
 
+# Keep “readable” definition simple and correct:
 def compute_readable(extracted_text: str) -> bool:
     return len((extracted_text or "").strip()) >= 30
 
@@ -450,7 +449,7 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
 
 
 # -----------------------------
-# OpenAI API (forced JSON) — FIXED
+# OpenAI API: DROP-IN MERGE BLOCK (forced JSON)
 # -----------------------------
 AI_RULES = """You are a homework coach. Diagnose the student's approach and provide targeted guidance WITHOUT giving away final numeric answers or a complete worked solution.
 
@@ -470,47 +469,6 @@ Output requirements:
 - Output MUST be valid JSON (a single JSON object). Return JSON only.
 """
 
-# Optional: a lightweight schema to improve consistency (still "json_object" forced).
-# Kept permissive so the model doesn't error if it includes extra fields.
-AI_JSON_SCHEMA = {
-    "name": "meb_tutor_feedback",
-    "schema": {
-        "type": "object",
-        "additionalProperties": True,
-        "properties": {
-            "schema_version": {"type": "string"},
-            "mode": {"type": "string"},
-            "part_id": {"type": "string"},
-            "confidence": {"type": "number"},
-            "issues": {"type": "array"},
-            "next_steps": {"type": "array"},
-            "hints": {"type": "array"},
-            "questions_for_student": {"type": "array"},
-            "safety": {"type": "object"},
-        },
-    },
-}
-
-def _openai_error_payload(msg: str) -> dict:
-    return {
-        "schema_version": "1.0",
-        "mode": "student",
-        "part_id": "?",
-        "confidence": 0.0,
-        "issues": [{
-            "category": "system",
-            "severity": "high",
-            "diagnosis": msg,
-            "why_it_matters": "The app can’t get AI feedback.",
-            "how_to_fix": "Confirm openai>=1.0.0 is installed, OPENAI_API_KEY is set, and check Streamlit logs."
-        }],
-        "next_steps": [],
-        "hints": [],
-        "questions_for_student": [],
-        "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
-    }
-
-
 def call_openai_feedback_json(
     system_prompt: str,
     user_prompt: str,
@@ -521,51 +479,63 @@ def call_openai_feedback_json(
 ) -> dict:
     """
     Calls OpenAI and forces a JSON object response.
-    FIX: Use the Responses API (openai>=1.x). This avoids common "response_format not supported"
-    and parsing issues seen with older chat.completions codepaths.
     Returns a dict; if anything fails, returns a schema-shaped error dict.
     """
     if not HAS_OPENAI:
-        return _openai_error_payload("OpenAI SDK not installed or too old. Ensure requirements.txt has: openai>=1.0.0")
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": "?",
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": "OpenAI SDK not installed (pip install openai).",
+                "why_it_matters": "The app can’t call the API.",
+                "how_to_fix": "Add openai to requirements.txt and redeploy/restart."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+        }
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
-        return _openai_error_payload("OPENAI_API_KEY missing from Streamlit secrets.")
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": "?",
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": "OPENAI_API_KEY missing from Streamlit secrets.",
+                "why_it_matters": "The app can’t authenticate to OpenAI.",
+                "how_to_fix": "Add OPENAI_API_KEY to .streamlit/secrets.toml (local) or Cloud Secrets and restart the app."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+        }
 
     model = st.secrets.get("OPENAI_MODEL", model_default)
+    client = OpenAI(api_key=api_key)
 
     try:
-        client = OpenAI(api_key=api_key)
-
-        # Prefer Responses API
-        # - response_format forces JSON output
-        # - input supports a list of role/content items
-        resp = client.responses.create(
+        resp = client.chat.completions.create(
             model=model,
             temperature=temperature,
-            max_output_tokens=max_output_tokens,
-            response_format={"type": "json_object"},
-            input=[
+            max_tokens=max_output_tokens,
+            response_format={"type": "json_object"},  # <-- forces valid JSON object
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         )
 
-        # Most robust way to get text from Responses API:
-        content = (getattr(resp, "output_text", None) or "").strip()
-        if not content:
-            # fallback: try to reconstruct from resp.output blocks
-            try:
-                blocks = []
-                for item in (resp.output or []):
-                    for c in (getattr(item, "content", None) or []):
-                        t = getattr(c, "text", None)
-                        if isinstance(t, str):
-                            blocks.append(t)
-                content = "\n".join(blocks).strip()
-            except Exception:
-                content = ""
-
+        content = (resp.choices[0].message.content or "").strip()
         if not content:
             raise ValueError("Model returned empty content")
 
@@ -576,7 +546,23 @@ def call_openai_feedback_json(
         return data
 
     except Exception as e:
-        return _openai_error_payload(f"AI call failed: {e}")
+        return {
+            "schema_version": "1.0",
+            "mode": "student",
+            "part_id": "?",
+            "confidence": 0.0,
+            "issues": [{
+                "category": "system",
+                "severity": "high",
+                "diagnosis": f"AI call failed: {e}",
+                "why_it_matters": "The API response was missing/invalid or the request failed.",
+                "how_to_fix": "Confirm OPENAI_API_KEY + OPENAI_MODEL, restart the app after changing secrets, and check Streamlit logs."
+            }],
+            "next_steps": [],
+            "hints": [],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+        }
 
 
 # -----------------------------
@@ -672,70 +658,6 @@ Return JSON only.
         fb["part_id"] = part_id
     fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
     return fb
-
-
-# -----------------------------
-# USER-FRIENDLY AI FEEDBACK DISPLAY
-# -----------------------------
-def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
-    st.subheader("AI Feedback")
-
-    confidence = feedback.get("confidence")
-    if isinstance(confidence, (int, float)):
-        st.progress(min(max(confidence, 0.0), 1.0))
-        st.caption(f"Confidence: {int(confidence * 100)}%")
-
-    issues = feedback.get("issues", [])
-    if issues:
-        st.markdown("### 🔎 What needs attention")
-        for issue in issues:
-            severity = issue.get("severity", "low")
-            diagnosis = issue.get("diagnosis", "")
-            why = issue.get("why_it_matters", "")
-            fix = issue.get("how_to_fix", "")
-
-            if severity == "high":
-                st.error(diagnosis)
-            elif severity == "medium":
-                st.warning(diagnosis)
-            else:
-                st.info(diagnosis)
-
-            if why:
-                st.markdown(f"**Why this matters:** {why}")
-            if fix:
-                st.markdown(f"**How to fix it:** {fix}")
-
-            st.markdown("---")
-
-    steps = feedback.get("next_steps", [])
-    if steps:
-        st.markdown("### 🪜 Recommended next steps")
-        for i, step in enumerate(steps, 1):
-            if isinstance(step, dict):
-                action = step.get("action", "")
-                why = step.get("why", "")
-            else:
-                action = str(step)
-                why = ""
-            st.markdown(f"{i}. **{action}**")
-            if why:
-                st.caption(why)
-
-    hints = feedback.get("hints", [])
-    if hints:
-        st.markdown("### 💡 Hint")
-        for hint in hints:
-            if isinstance(hint, dict):
-                st.info(hint.get("hint", ""))
-            else:
-                st.info(str(hint))
-
-    questions = feedback.get("questions_for_student", [])
-    if questions:
-        st.markdown("### ❓ Questions to consider")
-        for q in questions:
-            st.markdown(f"- {q}")
 
 
 # -----------------------------
@@ -955,6 +877,7 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.session_state[state_key] = True
             st.success("✅ Upload saved. (See sidebar → Uploaded files)")
 
+        # IMPORTANT: explicit None check (don’t overwrite right after upload)
         if uploaded is None:
             extracted_text, readable = get_latest_upload_text(attempt_id, part_id)
 
@@ -1015,7 +938,8 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
 
         fb = st.session_state.get(ai_feedback_key(attempt_id, part_id))
         if fb:
-            render_ai_feedback_userfriendly(fb)
+            st.subheader("AI feedback")
+            st.json(fb)
 
 
 # -----------------------------
