@@ -7,7 +7,7 @@
 #
 # requirements.txt (repo root, same level as app.py):
 #   streamlit
-#   openai
+#   openai>=1.0.0
 #   PyPDF2
 #   pdfplumber
 #   pymupdf
@@ -111,7 +111,6 @@ def extract_units_from_expected_output(expected_raw: Any) -> str:
     return ""
 
 
-# Keep “readable” definition simple and correct:
 def compute_readable(extracted_text: str) -> bool:
     return len((extracted_text or "").strip()) >= 30
 
@@ -449,7 +448,7 @@ def save_fallback(attempt_id: str, part_id: str, balance_equations: str, notes: 
 
 
 # -----------------------------
-# OpenAI API: DROP-IN MERGE BLOCK (forced JSON)
+# OpenAI API (forced JSON)
 # -----------------------------
 AI_RULES = """You are a homework coach. Diagnose the student's approach and provide targeted guidance WITHOUT giving away final numeric answers or a complete worked solution.
 
@@ -457,85 +456,134 @@ Hard restrictions:
 1) DO NOT compute or reveal the final numeric answer(s) for any asked-for unknown (e.g., V, L, x_B, etc.).
 2) DO NOT provide a full step-by-step worked solution. You may show at most ONE equation transformation or ONE algebra step if needed for clarity.
 3) DO NOT confirm final numeric answers even if the student wrote them. Confirm setup/logic instead.
-4) Use ONLY information from the problem statement, and the student's work text. Do not invent values.
+4) Use ONLY information from the problem statement and the student's work text. Do not invent values.
 
 What you SHOULD do:
 - Identify missing/incorrect equations, wrong variable meanings (z vs x vs y), sign conventions, unit handling, algebra issues.
-- Cite small evidence quotes from the student's text.
-- Provide 1–2 next steps and 1 hint.
+- Quote 1–3 small evidence snippets from the student's work (short, literal quotes).
+- Provide 2–4 concrete next steps, plus 1–2 hints (non-answer-revealing).
 - Ask 1–2 clarifying questions if the work is unclear.
 
 Output requirements:
 - Output MUST be valid JSON (a single JSON object). Return JSON only.
+
+Return JSON fields (best effort):
+- schema_version (string)
+- part_id (string)
+- confidence (number 0..1)
+- summary (string, 1–2 sentences)
+- evidence_quotes (array of strings)
+- issues (array of objects: category, severity=low|medium|high, diagnosis, why_it_matters, how_to_fix)
+- next_steps (array of objects: action, why)
+- hints (array of objects: level (1..3), hint, gives_final_answer=false)
+- questions_for_student (array of strings)
+- safety (object with: revealed_final_numeric_answer=false, revealed_full_solution=false, redactions_applied=false)
 """
+
+AI_JSON_SCHEMA = {
+    "name": "meb_tutor_feedback",
+    "schema": {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "schema_version": {"type": "string"},
+            "part_id": {"type": "string"},
+            "confidence": {"type": "number"},
+            "summary": {"type": "string"},
+            "evidence_quotes": {"type": "array", "items": {"type": "string"}},
+            "issues": {"type": "array"},
+            "next_steps": {"type": "array"},
+            "hints": {"type": "array"},
+            "questions_for_student": {"type": "array"},
+            "safety": {"type": "object"},
+        },
+        "required": ["schema_version", "part_id", "confidence", "issues", "next_steps", "hints", "questions_for_student", "safety"],
+    },
+}
+
+
+def _openai_error_payload(msg: str, part_id: str = "?") -> dict:
+    return {
+        "schema_version": "1.1",
+        "part_id": part_id,
+        "confidence": 0.0,
+        "summary": "AI feedback is unavailable right now.",
+        "evidence_quotes": [],
+        "issues": [{
+            "category": "system",
+            "severity": "high",
+            "diagnosis": msg,
+            "why_it_matters": "The app can’t get AI feedback.",
+            "how_to_fix": "Confirm openai>=1.0.0 is installed, OPENAI_API_KEY is set, and check Streamlit logs."
+        }],
+        "next_steps": [],
+        "hints": [],
+        "questions_for_student": [],
+        "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+    }
+
 
 def call_openai_feedback_json(
     system_prompt: str,
     user_prompt: str,
     *,
+    part_id: str,
     model_default: str = "gpt-4.1-mini",
     temperature: float = 0.25,
-    max_output_tokens: int = 900,
+    max_output_tokens: int = 950,
 ) -> dict:
     """
-    Calls OpenAI and forces a JSON object response.
-    Returns a dict; if anything fails, returns a schema-shaped error dict.
+    Calls OpenAI and forces a JSON object response using the Responses API (openai>=1.x).
+    UI improvement: we first try json_schema (more consistent for the UI), then fall back to json_object.
     """
     if not HAS_OPENAI:
-        return {
-            "schema_version": "1.0",
-            "mode": "student",
-            "part_id": "?",
-            "confidence": 0.0,
-            "issues": [{
-                "category": "system",
-                "severity": "high",
-                "diagnosis": "OpenAI SDK not installed (pip install openai).",
-                "why_it_matters": "The app can’t call the API.",
-                "how_to_fix": "Add openai to requirements.txt and redeploy/restart."
-            }],
-            "next_steps": [],
-            "hints": [],
-            "questions_for_student": [],
-            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
-        }
+        return _openai_error_payload("OpenAI SDK not installed or too old. Ensure requirements.txt has: openai>=1.0.0", part_id=part_id)
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
-        return {
-            "schema_version": "1.0",
-            "mode": "student",
-            "part_id": "?",
-            "confidence": 0.0,
-            "issues": [{
-                "category": "system",
-                "severity": "high",
-                "diagnosis": "OPENAI_API_KEY missing from Streamlit secrets.",
-                "why_it_matters": "The app can’t authenticate to OpenAI.",
-                "how_to_fix": "Add OPENAI_API_KEY to .streamlit/secrets.toml (local) or Cloud Secrets and restart the app."
-            }],
-            "next_steps": [],
-            "hints": [],
-            "questions_for_student": [],
-            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
-        }
+        return _openai_error_payload("OPENAI_API_KEY missing from Streamlit secrets.", part_id=part_id)
 
     model = st.secrets.get("OPENAI_MODEL", model_default)
-    client = OpenAI(api_key=api_key)
 
     try:
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=temperature,
-            max_tokens=max_output_tokens,
-            response_format={"type": "json_object"},  # <-- forces valid JSON object
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        )
+        client = OpenAI(api_key=api_key)
 
-        content = (resp.choices[0].message.content or "").strip()
+        # Try json_schema (if model/tooling supports it)
+        try:
+            resp = client.responses.create(
+                model=model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                response_format={"type": "json_schema", "json_schema": AI_JSON_SCHEMA},
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+        except Exception:
+            # Fall back to json_object
+            resp = client.responses.create(
+                model=model,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+                response_format={"type": "json_object"},
+                input=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+
+        content = (getattr(resp, "output_text", None) or "").strip()
+        if not content:
+            # fallback: reconstruct from resp.output blocks
+            blocks: List[str] = []
+            for item in (getattr(resp, "output", None) or []):
+                for c in (getattr(item, "content", None) or []):
+                    t = getattr(c, "text", None)
+                    if isinstance(t, str):
+                        blocks.append(t)
+            content = "\n".join(blocks).strip()
+
         if not content:
             raise ValueError("Model returned empty content")
 
@@ -546,27 +594,11 @@ def call_openai_feedback_json(
         return data
 
     except Exception as e:
-        return {
-            "schema_version": "1.0",
-            "mode": "student",
-            "part_id": "?",
-            "confidence": 0.0,
-            "issues": [{
-                "category": "system",
-                "severity": "high",
-                "diagnosis": f"AI call failed: {e}",
-                "why_it_matters": "The API response was missing/invalid or the request failed.",
-                "how_to_fix": "Confirm OPENAI_API_KEY + OPENAI_MODEL, restart the app after changing secrets, and check Streamlit logs."
-            }],
-            "next_steps": [],
-            "hints": [],
-            "questions_for_student": [],
-            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
-        }
+        return _openai_error_payload(f"AI call failed: {e}", part_id=part_id)
 
 
 # -----------------------------
-# Answer leak filter (optional but recommended)
+# Answer leak filter (recommended)
 # -----------------------------
 def extract_numbers(text: str) -> List[float]:
     nums: List[float] = []
@@ -596,15 +628,19 @@ def redact_if_leaks_answer(
     blob = json.dumps(feedback, ensure_ascii=False)
     for n in extract_numbers(blob):
         if within_tolerance(n, ans_val, tol_type, tol_val):
+            # Replace hints with a safe hint
             feedback["hints"] = [{
                 "level": 1,
-                "hint": "I can’t share the final number here — focus on checking your balances and algebra signs.",
+                "hint": "I can’t share the final number here — focus on checking your balances, units, and algebra signs.",
                 "gives_final_answer": False
             }]
             safety = feedback.get("safety") or {}
             safety["redactions_applied"] = True
             safety["revealed_final_numeric_answer"] = True
             feedback["safety"] = safety
+            # Also neutralize summary if it accidentally confirmed a final answer
+            if isinstance(feedback.get("summary"), str) and any(ch.isdigit() for ch in feedback["summary"]):
+                feedback["summary"] = "Good progress — let’s verify setup, assumptions, and algebra (without final numbers)."
             return feedback
     return feedback
 
@@ -619,20 +655,21 @@ def call_ai_feedback_openended(
 ) -> Dict[str, Any]:
     if not work_text or len(work_text.strip()) < 40:
         return {
-            "schema_version": "1.0",
-            "mode": "student",
+            "schema_version": "1.1",
             "part_id": part_id,
             "confidence": 0.2,
+            "summary": "I don’t have enough readable work to give precise feedback yet.",
             "evidence_quotes": [],
-            "detected_work": {},
             "issues": [{
                 "category": "missing_info",
                 "severity": "high",
                 "diagnosis": "Not enough readable work text to analyze.",
                 "why_it_matters": "AI needs your equations to give specific feedback.",
-                "how_to_fix": "Upload a typed PDF or paste equations into fallback form."
+                "how_to_fix": "Upload a typed PDF or paste equations into the fallback form."
             }],
-            "next_steps": [],
+            "next_steps": [
+                {"action": "Paste your key equations (overall + component balances) and define variables.", "why": "This lets feedback target the exact step that went wrong."}
+            ],
             "hints": [{"level": 1, "hint": "Start by writing the overall and component balances clearly.", "gives_final_answer": False}],
             "questions_for_student": [],
             "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
@@ -649,15 +686,295 @@ prompt={part_prompt}
 Student Work Text:
 {work_text}
 
-Return JSON only.
+Return JSON only. Use the field names from the system prompt.
 """.strip()
 
-    fb = call_openai_feedback_json(AI_RULES, user_prompt)
+    fb = call_openai_feedback_json(AI_RULES, user_prompt, part_id=part_id)
     if isinstance(fb, dict):
-        fb["schema_version"] = "1.0"
+        fb.setdefault("schema_version", "1.1")
         fb["part_id"] = part_id
+
     fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
+    fb = normalize_feedback_for_ui(fb, part_id=part_id)
     return fb
+
+
+# -----------------------------
+# UI normalization helpers (prevents janky rendering)
+# -----------------------------
+def _as_list(x: Any) -> List[Any]:
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return x
+    return [x]
+
+
+def _as_str(x: Any) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, str):
+        return x
+    return str(x)
+
+
+def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict[str, Any]:
+    """Make feedback safe/consistent for rendering even if the model returns odd shapes."""
+    if not isinstance(feedback, dict):
+        return _openai_error_payload("AI returned an unexpected format.", part_id=part_id)
+
+    out = dict(feedback)
+
+    out.setdefault("schema_version", "1.1")
+    out["part_id"] = _as_str(out.get("part_id") or part_id)
+    out["summary"] = _as_str(out.get("summary") or "")
+
+    conf = out.get("confidence", 0.0)
+    if not isinstance(conf, (int, float)):
+        conf = 0.0
+    out["confidence"] = max(0.0, min(float(conf), 1.0))
+
+    # evidence_quotes as list[str]
+    eq = out.get("evidence_quotes", [])
+    eq_list = []
+    for q in _as_list(eq):
+        s = _as_str(q).strip()
+        if s:
+            eq_list.append(s)
+    out["evidence_quotes"] = eq_list[:6]
+
+    # issues as list[dict]
+    issues_norm = []
+    for it in _as_list(out.get("issues", [])):
+        if isinstance(it, dict):
+            sev = _as_str(it.get("severity", "low")).lower().strip()
+            if sev not in {"low", "medium", "high"}:
+                sev = "low"
+            issues_norm.append({
+                "category": _as_str(it.get("category", "general")).strip() or "general",
+                "severity": sev,
+                "diagnosis": _as_str(it.get("diagnosis", "")).strip(),
+                "why_it_matters": _as_str(it.get("why_it_matters", "")).strip(),
+                "how_to_fix": _as_str(it.get("how_to_fix", "")).strip(),
+            })
+        else:
+            s = _as_str(it).strip()
+            if s:
+                issues_norm.append({
+                    "category": "general",
+                    "severity": "low",
+                    "diagnosis": s,
+                    "why_it_matters": "",
+                    "how_to_fix": "",
+                })
+    out["issues"] = issues_norm
+
+    # next_steps as list[dict]
+    steps_norm = []
+    for it in _as_list(out.get("next_steps", [])):
+        if isinstance(it, dict):
+            steps_norm.append({
+                "action": _as_str(it.get("action", "")).strip(),
+                "why": _as_str(it.get("why", "")).strip(),
+            })
+        else:
+            s = _as_str(it).strip()
+            if s:
+                steps_norm.append({"action": s, "why": ""})
+    out["next_steps"] = [s for s in steps_norm if s.get("action")][:8]
+
+    # hints as list[dict]
+    hints_norm = []
+    for it in _as_list(out.get("hints", [])):
+        if isinstance(it, dict):
+            lvl = it.get("level", 1)
+            try:
+                lvl_i = int(lvl)
+            except Exception:
+                lvl_i = 1
+            lvl_i = max(1, min(lvl_i, 3))
+            hints_norm.append({
+                "level": lvl_i,
+                "hint": _as_str(it.get("hint", "")).strip(),
+                "gives_final_answer": bool(it.get("gives_final_answer", False)),
+            })
+        else:
+            s = _as_str(it).strip()
+            if s:
+                hints_norm.append({"level": 1, "hint": s, "gives_final_answer": False})
+    out["hints"] = [h for h in hints_norm if h.get("hint")][:6]
+
+    # questions_for_student as list[str]
+    qs_norm = []
+    for q in _as_list(out.get("questions_for_student", [])):
+        s = _as_str(q).strip()
+        if s:
+            qs_norm.append(s)
+    out["questions_for_student"] = qs_norm[:6]
+
+    safety = out.get("safety") if isinstance(out.get("safety"), dict) else {}
+    out["safety"] = {
+        "revealed_final_numeric_answer": bool(safety.get("revealed_final_numeric_answer", False)),
+        "revealed_full_solution": bool(safety.get("revealed_full_solution", False)),
+        "redactions_applied": bool(safety.get("redactions_applied", False)),
+    }
+
+    return out
+
+
+# -----------------------------
+# USER-FRIENDLY AI FEEDBACK DISPLAY (UI IMPROVED)
+# -----------------------------
+def _severity_icon(sev: str) -> str:
+    sev = (sev or "").lower().strip()
+    return {"high": "🟥", "medium": "🟨", "low": "🟦"}.get(sev, "🟦")
+
+
+def _severity_label(sev: str) -> str:
+    sev = (sev or "").lower().strip()
+    return {"high": "High", "medium": "Medium", "low": "Low"}.get(sev, "Low")
+
+
+def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
+    fb = normalize_feedback_for_ui(feedback, part_id=_as_str(feedback.get("part_id", "?")))
+
+    st.markdown("#### 🤖 AI Feedback")
+    with st.container(border=True):
+        # Top metrics row
+        c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+        conf = fb.get("confidence", 0.0)
+        issues = fb.get("issues", [])
+        steps = fb.get("next_steps", [])
+        hints = fb.get("hints", [])
+
+        c1.metric("Confidence", f"{int(conf * 100)}%")
+        c2.metric("Issues", str(len(issues)))
+        c3.metric("Next steps", str(len(steps)))
+        c4.metric("Hints", str(len(hints)))
+
+        st.progress(conf)
+
+        summary = fb.get("summary") or ""
+        if summary:
+            st.info(summary)
+
+        # Evidence quotes (nice, compact)
+        evidence = fb.get("evidence_quotes", [])
+        if evidence:
+            with st.expander("Evidence from your work (quotes)", expanded=False):
+                for q in evidence:
+                    st.markdown(f"• “{q}”")
+
+        # Tabs for clean layout
+        tab_overview, tab_issues, tab_steps, tab_hints, tab_questions, tab_raw = st.tabs(
+            ["Overview", "Issues", "Next steps", "Hints", "Questions", "Raw JSON"]
+        )
+
+        with tab_overview:
+            # Quick “what to do first” block: show high/medium issues then first steps
+            high = [i for i in issues if i.get("severity") == "high"]
+            med = [i for i in issues if i.get("severity") == "medium"]
+            low = [i for i in issues if i.get("severity") == "low"]
+
+            if high or med or low:
+                st.markdown("**Priority**")
+                if high:
+                    st.error(f"Start with: {high[0].get('diagnosis','').strip() or 'Fix the highest-severity issue first.'}")
+                elif med:
+                    st.warning(f"Start with: {med[0].get('diagnosis','').strip() or 'Fix the medium-severity issue first.'}")
+                else:
+                    st.info(f"Start with: {low[0].get('diagnosis','').strip() or 'Polish the setup/units.'}")
+
+            if steps:
+                st.markdown("**Next step (recommended)**")
+                st.success(steps[0].get("action", "Review your setup and units."))
+                why = steps[0].get("why", "")
+                if why:
+                    st.caption(why)
+
+            # Safety indicator
+            safety = fb.get("safety", {})
+            if safety.get("redactions_applied"):
+                st.warning("Some content was redacted to avoid revealing the final numeric answer.")
+
+        with tab_issues:
+            if not issues:
+                st.success("No issues detected (or not enough work text to diagnose).")
+            else:
+                for idx, it in enumerate(issues, 1):
+                    sev = it.get("severity", "low")
+                    icon = _severity_icon(sev)
+                    title = it.get("diagnosis", "").strip() or f"Issue {idx}"
+                    category = it.get("category", "general")
+
+                    header = f"{icon} {title}  ·  *{category}*  ·  {_severity_label(sev)}"
+                    expanded = True if sev in ("high",) and idx == 1 else False
+                    with st.expander(header, expanded=expanded):
+                        why = it.get("why_it_matters", "")
+                        fix = it.get("how_to_fix", "")
+                        if why:
+                            st.markdown(f"**Why it matters**  \n{why}")
+                        if fix:
+                            st.markdown(f"**How to fix**  \n{fix}")
+
+        with tab_steps:
+            if not steps:
+                st.info("No next steps were returned.")
+            else:
+                st.markdown("Check off items as you fix them:")
+                for i, s in enumerate(steps, 1):
+                    action = s.get("action", "")
+                    why = s.get("why", "")
+                    if not action:
+                        continue
+                    st.checkbox(f"{i}. {action}", key=f"step_done_{fb['part_id']}_{i}")
+                    if why:
+                        st.caption(why)
+
+        with tab_hints:
+            if not hints:
+                st.info("No hints were returned.")
+            else:
+                # Sort by level: 1 (gentle) to 3 (stronger)
+                hints_sorted = sorted(hints, key=lambda h: int(h.get("level", 1)))
+                for h in hints_sorted:
+                    lvl = int(h.get("level", 1))
+                    text = h.get("hint", "")
+                    if not text:
+                        continue
+                    if lvl == 1:
+                        st.info(f"Level 1: {text}")
+                    elif lvl == 2:
+                        st.warning(f"Level 2: {text}")
+                    else:
+                        st.error(f"Level 3: {text}")
+
+        with tab_questions:
+            qs = fb.get("questions_for_student", [])
+            if not qs:
+                st.info("No questions were returned.")
+            else:
+                st.markdown("Answer these to pinpoint the mistake:")
+                for q in qs:
+                    st.markdown(f"- {q}")
+                st.divider()
+                st.caption("Optional: jot your answers here (not graded):")
+                st.text_area(
+                    "Your notes",
+                    key=f"student_notes_{fb['part_id']}",
+                    height=120,
+                    placeholder="Example: I used x as liquid mole fraction, but I didn’t define z…",
+                )
+
+        with tab_raw:
+            st.caption("Raw model output (useful for debugging prompt/schema).")
+            st.code(json.dumps(fb, ensure_ascii=False, indent=2), language="json")
+            st.download_button(
+                "Download JSON",
+                data=json.dumps(fb, ensure_ascii=False, indent=2).encode("utf-8"),
+                file_name=f"ai_feedback_{fb['part_id']}.json",
+                mime="application/json",
+            )
 
 
 # -----------------------------
@@ -845,12 +1162,19 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
         incorrect_parts_active = st.session_state.get("active_incorrect_parts") or []
         if attempt_id_active and incorrect_parts_active:
             st.warning("Upload your work for the parts you missed (one PDF per part).")
-            render_per_part_uploads(problem=problem, problem_id=pid, attempt_id=attempt_id_active, incorrect_parts=incorrect_parts_active, answer_key=answer_key)
+            render_per_part_uploads(
+                problem=problem,
+                problem_id=pid,
+                attempt_id=attempt_id_active,
+                incorrect_parts=incorrect_parts_active,
+                answer_key=answer_key,
+            )
         elif attempt_id_active:
             st.info("All graded parts are correct. No uploads needed.")
 
 
-def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id: str, incorrect_parts: List[str], answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
+def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id: str, incorrect_parts: List[str],
+                            answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     st.divider()
     st.subheader("Upload Work (Per Part)")
 
@@ -877,7 +1201,6 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.session_state[state_key] = True
             st.success("✅ Upload saved. (See sidebar → Uploaded files)")
 
-        # IMPORTANT: explicit None check (don’t overwrite right after upload)
         if uploaded is None:
             extracted_text, readable = get_latest_upload_text(attempt_id, part_id)
 
@@ -895,8 +1218,10 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.warning("⚠️ We couldn’t extract enough text. Please fill the fallback form for AI feedback.")
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=fallback_expanded):
-            balance = st.text_area("Paste the balance(s)/equation(s) you used (text)", height=120, key=f"fb_balance_{attempt_id}_{part_id}")
-            notes = st.text_area("Notes (what you tried / where you think the mistake is)", height=100, key=f"fb_notes_{attempt_id}_{part_id}")
+            balance = st.text_area("Paste the balance(s)/equation(s) you used (text)", height=120,
+                                   key=f"fb_balance_{attempt_id}_{part_id}")
+            notes = st.text_area("Notes (what you tried / where you think the mistake is)", height=100,
+                                 key=f"fb_notes_{attempt_id}_{part_id}")
             if st.button("Save fallback info", key=f"fb_save_{attempt_id}_{part_id}"):
                 save_fallback(attempt_id, part_id, balance, notes)
                 st.success("✅ Fallback information saved.")
@@ -924,22 +1249,22 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.caption(f"AI will use: **{source_label}**" if can_request_ai else "Upload a typed PDF or fill fallback (a couple lines/equations).")
 
         if get_fb:
-            part_obj = parts_map.get(part_id, {})
-            part_prompt = (part_obj.get("prompt") or "")
-            fb = call_ai_feedback_openended(
-                problem_id=problem_id,
-                part_id=part_id,
-                problem_statement=(problem.get("statement", "") or ""),
-                part_prompt=part_prompt,
-                work_text=work_text,
-                answer_key=answer_key,
-            )
+            with st.spinner("Analyzing your work…"):
+                part_obj = parts_map.get(part_id, {})
+                part_prompt = (part_obj.get("prompt") or "")
+                fb = call_ai_feedback_openended(
+                    problem_id=problem_id,
+                    part_id=part_id,
+                    problem_statement=(problem.get("statement", "") or ""),
+                    part_prompt=part_prompt,
+                    work_text=work_text,
+                    answer_key=answer_key,
+                )
             st.session_state[ai_feedback_key(attempt_id, part_id)] = fb
 
         fb = st.session_state.get(ai_feedback_key(attempt_id, part_id))
         if fb:
-            st.subheader("AI feedback")
-            st.json(fb)
+            render_ai_feedback_userfriendly(fb)
 
 
 # -----------------------------
