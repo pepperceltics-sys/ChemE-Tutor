@@ -533,69 +533,62 @@ def call_openai_feedback_json(
     max_output_tokens: int = 950,
 ) -> dict:
     """
-    Calls OpenAI and forces a JSON object response using the Responses API (openai>=1.x).
-    UI improvement: we first try json_schema (more consistent for the UI), then fall back to json_object.
+    Compatible with openai>=1.0.0 and avoids the response_format error.
+    Forces JSON using chat.completions.
     """
+
     if not HAS_OPENAI:
-        return _openai_error_payload("OpenAI SDK not installed or too old. Ensure requirements.txt has: openai>=1.0.0", part_id=part_id)
+        return _openai_error_payload(
+            "OpenAI SDK not installed. Add openai>=1.0.0 to requirements.txt",
+            part_id=part_id,
+        )
 
     api_key = st.secrets.get("OPENAI_API_KEY")
     if not api_key:
-        return _openai_error_payload("OPENAI_API_KEY missing from Streamlit secrets.", part_id=part_id)
+        return _openai_error_payload(
+            "OPENAI_API_KEY missing from Streamlit secrets.",
+            part_id=part_id,
+        )
 
     model = st.secrets.get("OPENAI_MODEL", model_default)
 
     try:
         client = OpenAI(api_key=api_key)
 
-        # Try json_schema (if model/tooling supports it)
-        try:
-            resp = client.responses.create(
-                model=model,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                response_format={"type": "json_schema", "json_schema": AI_JSON_SCHEMA},
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-        except Exception:
-            # Fall back to json_object
-            resp = client.responses.create(
-                model=model,
-                temperature=temperature,
-                max_output_tokens=max_output_tokens,
-                response_format={"type": "json_object"},
-                input=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=temperature,
+            max_tokens=max_output_tokens,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                    + "\n\nIMPORTANT: Return ONLY valid JSON."
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                },
+            ],
+        )
 
-        content = (getattr(resp, "output_text", None) or "").strip()
-        if not content:
-            # fallback: reconstruct from resp.output blocks
-            blocks: List[str] = []
-            for item in (getattr(resp, "output", None) or []):
-                for c in (getattr(item, "content", None) or []):
-                    t = getattr(c, "text", None)
-                    if isinstance(t, str):
-                        blocks.append(t)
-            content = "\n".join(blocks).strip()
+        content = (resp.choices[0].message.content or "").strip()
 
         if not content:
             raise ValueError("Model returned empty content")
 
         data = json.loads(content)
+
         if not isinstance(data, dict):
-            raise ValueError("Model returned non-object JSON")
+            raise ValueError("Model returned non‑object JSON")
 
         return data
 
     except Exception as e:
-        return _openai_error_payload(f"AI call failed: {e}", part_id=part_id)
-
+        return _openai_error_payload(
+            f"AI call failed: {e}",
+            part_id=part_id,
+        )
 
 # -----------------------------
 # Answer leak filter (recommended)
