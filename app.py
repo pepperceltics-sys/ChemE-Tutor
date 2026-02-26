@@ -661,6 +661,86 @@ Return JSON only.
 
 
 # -----------------------------
+# USER‑FRIENDLY AI FEEDBACK DISPLAY
+# -----------------------------
+def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
+
+    st.subheader("AI Feedback")
+
+    confidence = feedback.get("confidence")
+
+    if isinstance(confidence, (int, float)):
+        st.progress(min(max(confidence, 0.0), 1.0))
+        st.caption(f"Confidence: {int(confidence*100)}%")
+
+    issues = feedback.get("issues", [])
+
+    if issues:
+        st.markdown("### 🔎 What needs attention")
+
+        for issue in issues:
+
+            severity = issue.get("severity", "low")
+            diagnosis = issue.get("diagnosis", "")
+            why = issue.get("why_it_matters", "")
+            fix = issue.get("how_to_fix", "")
+
+            if severity == "high":
+                st.error(diagnosis)
+
+            elif severity == "medium":
+                st.warning(diagnosis)
+
+            else:
+                st.info(diagnosis)
+
+            if why:
+                st.markdown(f"**Why this matters:** {why}")
+
+            if fix:
+                st.markdown(f"**How to fix it:** {fix}")
+
+            st.markdown("---")
+
+    steps = feedback.get("next_steps", [])
+
+    if steps:
+        st.markdown("### 🪜 Recommended next steps")
+
+        for i, step in enumerate(steps, 1):
+
+            action = step.get("action", "")
+            why = step.get("why", "")
+
+            st.markdown(f"{i}. **{action}**")
+
+            if why:
+                st.caption(why)
+
+    hints = feedback.get("hints", [])
+
+    if hints:
+        st.markdown("### 💡 Hint")
+
+        for hint in hints:
+
+            if isinstance(hint, dict):
+                st.info(hint.get("hint", ""))
+
+            else:
+                st.info(str(hint))
+
+    questions = feedback.get("questions_for_student", [])
+
+    if questions:
+        st.markdown("### ❓ Questions to consider")
+
+        for q in questions:
+            st.markdown(f"- {q}")
+
+
+
+# -----------------------------
 # Session state
 # -----------------------------
 def init_session_state() -> None:
@@ -938,8 +1018,7 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
 
         fb = st.session_state.get(ai_feedback_key(attempt_id, part_id))
         if fb:
-            st.subheader("AI feedback")
-            st.json(fb)
+            render_ai_feedback_userfriendly(fb)
 
 
 # -----------------------------
