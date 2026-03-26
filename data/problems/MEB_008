@@ -1,0 +1,55 @@
+{
+  "problem_id": "MEB_008",
+  "title": "Reactor with Recycle — Propane Conversion",
+  "statement": "A process is designed for a 95% overall conversion of propane. The reaction products are separated into two streams. The first stream (product) contains H2, C3H6, and 0.555% of the propane that leaves the reactor. The second stream contains the remaining unreacted propane and propylene, in an amount equal to 5% of that in the first stream, and is recycled to the reactor.\n\nThe fresh feed is 100 mol of propane.\n\nCalculate:\n1) The composition of the product stream\n2) The recycle ratio (moles recycled / moles fresh feed)\n3) The single-pass conversion in the reactor.",
+
+  "tutor_layer": {
+    "expected_setup": {
+      "knowns": {
+        "n1": "Fresh feed (100 mol propane)",
+        "overall_conversion": "0.95",
+        "propane_loss_fraction": "0.00555",
+        "recycle_fraction": "0.05"
+      },
+      "unknowns": [
+        {"symbol": "n3", "description": "Propane leaving reactor"},
+        {"symbol": "n6", "description": "H2 in product"},
+        {"symbol": "n7", "description": "C3H6 in product"},
+        {"symbol": "n8", "description": "C3H8 in product"},
+        {"symbol": "n9", "description": "C3H8 in recycle"},
+        {"symbol": "n10", "description": "C3H6 in recycle"}
+      ]
+    }
+  },
+
+  "notation": {
+    "description": "Use the following variable definitions for all balances and calculations:",
+    "variables": [
+      "n1 = fresh propane feed (100 mol)",
+      "n3 = propane leaving reactor",
+      "n6 = hydrogen in product stream",
+      "n7 = propylene (C3H6) in product stream",
+      "n8 = propane (C3H8) in product stream",
+      "n9 = propane in recycle stream",
+      "n10 = propylene in recycle stream"
+    ]
+  },
+
+  "parts": [
+    {
+      "part_id": "a",
+      "prompt": "Calculate the mole fractions of H2, C3H6, and C3H8 in the product stream.",
+      "expected_output": {"units": "mole fraction"}
+    },
+    {
+      "part_id": "b",
+      "prompt": "Calculate the recycle ratio (moles recycled / moles fresh feed).",
+      "expected_output": {"units": "dimensionless"}
+    },
+    {
+      "part_id": "c",
+      "prompt": "Calculate the single-pass conversion in the reactor (in %).",
+      "expected_output": {"units": "%"}
+    }
+  ]
+}
