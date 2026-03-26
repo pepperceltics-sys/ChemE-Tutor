@@ -117,36 +117,41 @@ def compute_readable(extracted_text: str) -> bool:
 
 def normalize_assignments_structure(raw_assignments: dict) -> Dict[str, Dict[str, List[str]]]:
     """
-    Supports both:
-      New format:
-        {
-          "Class A": {
-            "Assignment 1": ["p1", "p2"]
-          },
-          "Class B": {
-            "Assignment X": ["p9"]
-          }
-        }
+    Supports both formats:
 
-      Old format:
-        {
-          "Assignment 1": ["p1", "p2"],
-          "Assignment 2": ["p3"]
-        }
+    Old format:
+    {
+      "Assignment 1": ["MEB_001", "MEB_002"],
+      "Assignment 2": ["MEB_003"]
+    }
 
-    Old format is wrapped into a default class for backward compatibility.
+    New format:
+    {
+      "Class A": {
+        "Assignment 1": ["MEB_001", "MEB_002"]
+      },
+      "Class B": {
+        "Assignment 1": ["MEB_003"]
+      }
+    }
+
+    Old format is wrapped into a default class.
     """
     if not isinstance(raw_assignments, dict) or not raw_assignments:
         return {}
 
     first_val = next(iter(raw_assignments.values()))
 
-    # Old format: assignment -> [problem_ids]
+    # Old flat format
     if isinstance(first_val, list):
-        return {"Default Class": raw_assignments}
+        normalized_old: Dict[str, Dict[str, List[str]]] = {"Default Class": {}}
+        for assignment_name, problem_ids in raw_assignments.items():
+            if isinstance(problem_ids, list):
+                normalized_old["Default Class"][str(assignment_name)] = [str(pid) for pid in problem_ids]
+        return normalized_old
 
-    # New format: class -> {assignment -> [problem_ids]}
-    normalized: Dict[str, Dict[str, List[str]]] = {}
+    # New nested format
+    normalized_new: Dict[str, Dict[str, List[str]]] = {}
     for class_name, assignments_map in raw_assignments.items():
         if not isinstance(assignments_map, dict):
             continue
@@ -155,10 +160,11 @@ def normalize_assignments_structure(raw_assignments: dict) -> Dict[str, Dict[str
         for assignment_name, problem_ids in assignments_map.items():
             if isinstance(problem_ids, list):
                 class_assignments[str(assignment_name)] = [str(pid) for pid in problem_ids]
-        if class_assignments:
-            normalized[str(class_name)] = class_assignments
 
-    return normalized
+        if class_assignments:
+            normalized_new[str(class_name)] = class_assignments
+
+    return normalized_new
 
 
 # -----------------------------
@@ -584,11 +590,6 @@ def call_openai_feedback_json(
     temperature: float = 0.25,
     max_output_tokens: int = 950,
 ) -> dict:
-    """
-    Compatible with openai>=1.0.0 and avoids the response_format error.
-    Forces JSON using chat.completions.
-    """
-
     if not HAS_OPENAI:
         return _openai_error_payload(
             "OpenAI SDK not installed. Add openai>=1.0.0 to requirements.txt",
@@ -614,8 +615,7 @@ def call_openai_feedback_json(
             messages=[
                 {
                     "role": "system",
-                    "content": system_prompt
-                    + "\n\nIMPORTANT: Return ONLY valid JSON."
+                    "content": system_prompt + "\n\nIMPORTANT: Return ONLY valid JSON."
                 },
                 {
                     "role": "user",
@@ -642,8 +642,9 @@ def call_openai_feedback_json(
             part_id=part_id,
         )
 
+
 # -----------------------------
-# Answer leak filter (recommended)
+# Answer leak filter
 # -----------------------------
 def extract_numbers(text: str) -> List[float]:
     nums: List[float] = []
@@ -688,63 +689,6 @@ def redact_if_leaks_answer(
     return feedback
 
 
-def call_ai_feedback_openended(
-    problem_id: str,
-    part_id: str,
-    problem_statement: str,
-    part_prompt: str,
-    work_text: str,
-    answer_key: Dict[Tuple[str, str], Dict[str, str]],
-) -> Dict[str, Any]:
-    if not work_text or len(work_text.strip()) < 40:
-        return {
-            "schema_version": "1.1",
-            "part_id": part_id,
-            "confidence": 0.2,
-            "summary": "I don’t have enough readable work to give precise feedback yet.",
-            "evidence_quotes": [],
-            "issues": [{
-                "category": "missing_info",
-                "severity": "high",
-                "diagnosis": "Not enough readable work text to analyze.",
-                "why_it_matters": "AI needs your equations to give specific feedback.",
-                "how_to_fix": "Upload a typed PDF or paste equations into the fallback form."
-            }],
-            "next_steps": [
-                {"action": "Paste your key equations (overall + component balances) and define variables.", "why": "This lets feedback target the exact step that went wrong."}
-            ],
-            "hints": [{"level": 1, "hint": "Start by writing the overall and component balances clearly.", "gives_final_answer": False}],
-            "questions_for_student": [],
-            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
-        }
-
-    user_prompt = f"""
-Problem Statement:
-{problem_statement}
-
-Part:
-part_id={part_id}
-prompt={part_prompt}
-
-Student Work Text:
-{work_text}
-
-Return JSON only. Use the field names from the system prompt.
-""".strip()
-
-    fb = call_openai_feedback_json(AI_RULES, user_prompt, part_id=part_id)
-    if isinstance(fb, dict):
-        fb.setdefault("schema_version", "1.1")
-        fb["part_id"] = part_id
-
-    fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
-    fb = normalize_feedback_for_ui(fb, part_id=part_id)
-    return fb
-
-
-# -----------------------------
-# UI normalization helpers (prevents janky rendering)
-# -----------------------------
 def _as_list(x: Any) -> List[Any]:
     if x is None:
         return []
@@ -859,8 +803,62 @@ def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict
     return out
 
 
+def call_ai_feedback_openended(
+    problem_id: str,
+    part_id: str,
+    problem_statement: str,
+    part_prompt: str,
+    work_text: str,
+    answer_key: Dict[Tuple[str, str], Dict[str, str]],
+) -> Dict[str, Any]:
+    if not work_text or len(work_text.strip()) < 40:
+        return {
+            "schema_version": "1.1",
+            "part_id": part_id,
+            "confidence": 0.2,
+            "summary": "I don’t have enough readable work to give precise feedback yet.",
+            "evidence_quotes": [],
+            "issues": [{
+                "category": "missing_info",
+                "severity": "high",
+                "diagnosis": "Not enough readable work text to analyze.",
+                "why_it_matters": "AI needs your equations to give specific feedback.",
+                "how_to_fix": "Upload a typed PDF or paste equations into the fallback form."
+            }],
+            "next_steps": [
+                {"action": "Paste your key equations (overall + component balances) and define variables.", "why": "This lets feedback target the exact step that went wrong."}
+            ],
+            "hints": [{"level": 1, "hint": "Start by writing the overall and component balances clearly.", "gives_final_answer": False}],
+            "questions_for_student": [],
+            "safety": {"revealed_final_numeric_answer": False, "revealed_full_solution": False, "redactions_applied": False},
+        }
+
+    user_prompt = f"""
+Problem Statement:
+{problem_statement}
+
+Part:
+part_id={part_id}
+prompt={part_prompt}
+
+Student Work Text:
+{work_text}
+
+Return JSON only. Use the field names from the system prompt.
+""".strip()
+
+    fb = call_openai_feedback_json(AI_RULES, user_prompt, part_id=part_id)
+    if isinstance(fb, dict):
+        fb.setdefault("schema_version", "1.1")
+        fb["part_id"] = part_id
+
+    fb = redact_if_leaks_answer(fb, problem_id, part_id, answer_key)
+    fb = normalize_feedback_for_ui(fb, part_id=part_id)
+    return fb
+
+
 # -----------------------------
-# USER-FRIENDLY AI FEEDBACK DISPLAY (UI IMPROVED)
+# AI feedback display
 # -----------------------------
 def _severity_icon(sev: str) -> str:
     sev = (sev or "").lower().strip()
@@ -1028,6 +1026,7 @@ def init_session_state() -> None:
 # -----------------------------
 def render_sidebar(assignments_by_class: Dict[str, Dict[str, List[str]]]) -> None:
     st.sidebar.title("Navigation")
+
     class_names = list(assignments_by_class.keys())
     if not class_names:
         st.sidebar.error("No classes found.")
@@ -1052,6 +1051,7 @@ def render_sidebar(assignments_by_class: Dict[str, Dict[str, List[str]]]) -> Non
 
     default_p = pids.index(st.session_state["selected_problem_id"]) if st.session_state["selected_problem_id"] in pids else 0
     st.session_state["selected_problem_id"] = st.sidebar.selectbox("Problem", pids, index=default_p)
+
     st.sidebar.divider()
 
 
@@ -1066,8 +1066,8 @@ def render_sidebar_tabs(problem_id: str) -> None:
         else:
             labels, ids = [], []
             for created_utc, attempt_id, class_name, assignment in rows:
-                class_label = f"{class_name} • " if class_name else ""
-                labels.append(f"{created_utc} ({attempt_id[:8]}) — {class_label}{assignment}")
+                class_prefix = f"{class_name} • " if class_name else ""
+                labels.append(f"{created_utc} ({attempt_id[:8]}) — {class_prefix}{assignment}")
                 ids.append(attempt_id)
 
             idx = st.selectbox("View", list(range(len(labels))), format_func=lambda i: labels[i])
@@ -1109,7 +1109,7 @@ def render_sidebar_tabs(problem_id: str) -> None:
 
 
 # -----------------------------
-# Nomenclature helper (optional)
+# Nomenclature helper
 # -----------------------------
 def render_nomenclature_hint(problem: Dict[str, Any]) -> None:
     tutor = problem.get("tutor_layer") or {}
