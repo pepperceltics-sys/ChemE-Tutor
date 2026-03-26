@@ -16,3 +16,8 @@ MEB_006,a,22.5,mol/min,absolute,1
 MEB_006,b,37.5,mol/min,absolute,1
 MEB_007,a,75,mol/min,absolute,1
 MEB_007,b,125,mol/min,absolute,1
+MEB_008,a1,0.48718,mole fraction,absolute,0.0005
+MEB_008,a2,0.48718,mole fraction,absolute,0.0005
+MEB_008,a3,0.02564,mole fraction,absolute,0.0005
+MEB_008,b,9.00651,dimensionless,relative,0.0001
+MEB_008,c,9.53917,%,relative,0.0001
