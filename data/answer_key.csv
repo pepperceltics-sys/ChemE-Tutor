@@ -21,3 +21,7 @@ MEB_008,a2,0.48718,mole fraction,absolute,0.0005
 MEB_008,a3,0.02564,mole fraction,absolute,0.0005
 MEB_008,b,9.00651,dimensionless,relative,0.0001
 MEB_008,c,9.53917,%,relative,0.0001
+HT_001,a,-2400,K/m,absolute,1
+HT_001,b,38400,W/m^2,absolute,10
+HT_002,a,-562.5,K/m,absolute,0.5
+HT_002,b,101.25,W/m^2,absolute,0.1
