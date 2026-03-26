@@ -1,0 +1,55 @@
+{
+  "problem_id": "HT_001",
+  "title": "Heat Transfer 1 \u2014 One-Dimensional Heat Flux Through a Plane Wall",
+  "statement": "A flat wall made of stainless steel separates two regions held at different temperatures. Assume steady-state, one-dimensional conduction with constant thermal conductivity and no heat generation.\n\nGiven:\n- Thermal conductivity, k = 16.0 W/m\u00b7K\n- Wall thickness, L = 0.025 m\n- Hot-side surface temperature, T_hot = 150 \u00b0C\n- Cold-side surface temperature, T_cold = 90 \u00b0C\n\nUse Fourier\u2019s law for one-dimensional conduction to determine the heat flux through the wall. Take the positive x-direction from the hot side toward the cold side.",
+  "parts": [
+    {
+      "part_id": "a",
+      "prompt": "Calculate the temperature gradient dT/dx across the wall.",
+      "expected_output": {
+        "units": "K/m"
+      }
+    },
+    {
+      "part_id": "b",
+      "prompt": "Calculate the one-dimensional heat flux q'' through the wall.",
+      "expected_output": {
+        "units": "W/m^2"
+      }
+    }
+  ],
+  "tutor_layer": {
+    "expected_setup": {
+      "knowns": {
+        "k": "16.0 W/m\u00b7K",
+        "L": "0.025 m",
+        "T_hot": "150 \u00b0C",
+        "T_cold": "90 \u00b0C"
+      },
+      "unknowns": [
+        {
+          "symbol": "dT/dx",
+          "meaning": "Temperature gradient across the wall"
+        },
+        {
+          "symbol": "q''",
+          "meaning": "One-dimensional heat flux"
+        }
+      ],
+      "equations": [
+        "dT/dx = (T_cold - T_hot) / L",
+        "q'' = -k (dT/dx)"
+      ]
+    },
+    "common_mistakes": [
+      "Using the wall thickness in centimeters instead of meters",
+      "Dropping the negative sign in Fourier\u2019s law without considering direction",
+      "Using T_hot - T_cold when the defined x-direction is from hot to cold and then applying the sign incorrectly"
+    ],
+    "hints": [
+      "Write the temperature gradient first, then apply Fourier\u2019s law.",
+      "Check the sign convention based on the positive x-direction.",
+      "Heat should flow from the hotter side to the colder side."
+    ]
+  }
+}

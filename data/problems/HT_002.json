@@ -1,0 +1,55 @@
+{
+  "problem_id": "HT_002",
+  "title": "Heat Transfer 2 \u2014 One-Dimensional Heat Flux Through an Insulating Slab",
+  "statement": "A rigid insulating slab is used in a wall section. Assume steady-state, one-dimensional conduction with constant thermal conductivity and no internal heat generation.\n\nGiven:\n- Thermal conductivity, k = 0.18 W/m\u00b7K\n- Slab thickness, L = 0.080 m\n- Left surface temperature, T_left = 65 \u00b0C\n- Right surface temperature, T_right = 20 \u00b0C\n\nUse Fourier\u2019s law for one-dimensional conduction to determine the heat flux through the slab. Take the positive x-direction from left to right.",
+  "parts": [
+    {
+      "part_id": "a",
+      "prompt": "Calculate the temperature gradient dT/dx across the slab.",
+      "expected_output": {
+        "units": "K/m"
+      }
+    },
+    {
+      "part_id": "b",
+      "prompt": "Calculate the one-dimensional heat flux q'' through the slab.",
+      "expected_output": {
+        "units": "W/m^2"
+      }
+    }
+  ],
+  "tutor_layer": {
+    "expected_setup": {
+      "knowns": {
+        "k": "0.18 W/m\u00b7K",
+        "L": "0.080 m",
+        "T_left": "65 \u00b0C",
+        "T_right": "20 \u00b0C"
+      },
+      "unknowns": [
+        {
+          "symbol": "dT/dx",
+          "meaning": "Temperature gradient across the slab"
+        },
+        {
+          "symbol": "q''",
+          "meaning": "One-dimensional heat flux"
+        }
+      ],
+      "equations": [
+        "dT/dx = (T_right - T_left) / L",
+        "q'' = -k (dT/dx)"
+      ]
+    },
+    "common_mistakes": [
+      "Using the wrong sign for the temperature gradient",
+      "Confusing heat flux with total heat transfer rate",
+      "Forgetting that a lower thermal conductivity gives a smaller heat flux for the same geometry and temperature difference"
+    ],
+    "hints": [
+      "The temperature gradient is the change in temperature divided by the slab thickness.",
+      "Heat flux is proportional to both thermal conductivity and the magnitude of the temperature gradient.",
+      "Keep the distinction between q'' and Q clear."
+    ]
+  }
+}
