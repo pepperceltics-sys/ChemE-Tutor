@@ -115,14 +115,61 @@ def compute_readable(extracted_text: str) -> bool:
     return len((extracted_text or "").strip()) >= 30
 
 
+def normalize_assignments_structure(raw_assignments: dict) -> Dict[str, Dict[str, List[str]]]:
+    """
+    Supports both:
+      New format:
+        {
+          "Class A": {
+            "Assignment 1": ["p1", "p2"]
+          },
+          "Class B": {
+            "Assignment X": ["p9"]
+          }
+        }
+
+      Old format:
+        {
+          "Assignment 1": ["p1", "p2"],
+          "Assignment 2": ["p3"]
+        }
+
+    Old format is wrapped into a default class for backward compatibility.
+    """
+    if not isinstance(raw_assignments, dict) or not raw_assignments:
+        return {}
+
+    first_val = next(iter(raw_assignments.values()))
+
+    # Old format: assignment -> [problem_ids]
+    if isinstance(first_val, list):
+        return {"Default Class": raw_assignments}
+
+    # New format: class -> {assignment -> [problem_ids]}
+    normalized: Dict[str, Dict[str, List[str]]] = {}
+    for class_name, assignments_map in raw_assignments.items():
+        if not isinstance(assignments_map, dict):
+            continue
+
+        class_assignments: Dict[str, List[str]] = {}
+        for assignment_name, problem_ids in assignments_map.items():
+            if isinstance(problem_ids, list):
+                class_assignments[str(assignment_name)] = [str(pid) for pid in problem_ids]
+        if class_assignments:
+            normalized[str(class_name)] = class_assignments
+
+    return normalized
+
+
 # -----------------------------
 # Data loading
 # -----------------------------
 @st.cache_data
-def load_assignments() -> dict:
+def load_assignments() -> Dict[str, Dict[str, List[str]]]:
     if not ASSIGNMENTS_FILE.exists():
         raise FileNotFoundError(f"Missing {ASSIGNMENTS_FILE}")
-    return json.loads(ASSIGNMENTS_FILE.read_text(encoding="utf-8"))
+    raw = json.loads(ASSIGNMENTS_FILE.read_text(encoding="utf-8"))
+    return normalize_assignments_structure(raw)
 
 
 @st.cache_data
@@ -210,11 +257,16 @@ def db_init_and_migrate() -> None:
             CREATE TABLE IF NOT EXISTS attempts (
                 attempt_id TEXT PRIMARY KEY,
                 created_utc TEXT NOT NULL,
+                class_name TEXT NOT NULL DEFAULT '',
                 assignment TEXT NOT NULL,
                 problem_id TEXT NOT NULL
             );
             """
         )
+
+        if not db_has_column(conn, "attempts", "class_name"):
+            conn.execute("ALTER TABLE attempts ADD COLUMN class_name TEXT NOT NULL DEFAULT '';")
+
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS attempt_parts (
@@ -265,15 +317,15 @@ def db_init_and_migrate() -> None:
         conn.commit()
 
 
-def log_attempt(assignment: str, problem_id: str) -> str:
+def log_attempt(class_name: str, assignment: str, problem_id: str) -> str:
     attempt_id = str(uuid.uuid4())
     with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO attempts (attempt_id, created_utc, assignment, problem_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO attempts (attempt_id, created_utc, class_name, assignment, problem_id)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (attempt_id, utc_now_iso(), assignment, problem_id),
+            (attempt_id, utc_now_iso(), class_name, assignment, problem_id),
         )
         conn.commit()
     return attempt_id
@@ -291,11 +343,11 @@ def log_attempt_part(attempt_id: str, part_id: str, student_answer: str, is_corr
         conn.commit()
 
 
-def list_attempts_for_problem(problem_id: str, limit: int = 10) -> List[Tuple[str, str]]:
+def list_attempts_for_problem(problem_id: str, limit: int = 10) -> List[Tuple[str, str, str, str]]:
     with db_connect() as conn:
         cur = conn.execute(
             """
-            SELECT created_utc, attempt_id
+            SELECT created_utc, attempt_id, class_name, assignment
             FROM attempts
             WHERE problem_id = ?
             ORDER BY created_utc DESC
@@ -580,7 +632,7 @@ def call_openai_feedback_json(
         data = json.loads(content)
 
         if not isinstance(data, dict):
-            raise ValueError("Model returned non‑object JSON")
+            raise ValueError("Model returned non-object JSON")
 
         return data
 
@@ -621,7 +673,6 @@ def redact_if_leaks_answer(
     blob = json.dumps(feedback, ensure_ascii=False)
     for n in extract_numbers(blob):
         if within_tolerance(n, ans_val, tol_type, tol_val):
-            # Replace hints with a safe hint
             feedback["hints"] = [{
                 "level": 1,
                 "hint": "I can’t share the final number here — focus on checking your balances, units, and algebra signs.",
@@ -631,7 +682,6 @@ def redact_if_leaks_answer(
             safety["redactions_applied"] = True
             safety["revealed_final_numeric_answer"] = True
             feedback["safety"] = safety
-            # Also neutralize summary if it accidentally confirmed a final answer
             if isinstance(feedback.get("summary"), str) and any(ch.isdigit() for ch in feedback["summary"]):
                 feedback["summary"] = "Good progress — let’s verify setup, assumptions, and algebra (without final numbers)."
             return feedback
@@ -712,7 +762,6 @@ def _as_str(x: Any) -> str:
 
 
 def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict[str, Any]:
-    """Make feedback safe/consistent for rendering even if the model returns odd shapes."""
     if not isinstance(feedback, dict):
         return _openai_error_payload("AI returned an unexpected format.", part_id=part_id)
 
@@ -727,7 +776,6 @@ def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict
         conf = 0.0
     out["confidence"] = max(0.0, min(float(conf), 1.0))
 
-    # evidence_quotes as list[str]
     eq = out.get("evidence_quotes", [])
     eq_list = []
     for q in _as_list(eq):
@@ -736,7 +784,6 @@ def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict
             eq_list.append(s)
     out["evidence_quotes"] = eq_list[:6]
 
-    # issues as list[dict]
     issues_norm = []
     for it in _as_list(out.get("issues", [])):
         if isinstance(it, dict):
@@ -762,7 +809,6 @@ def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict
                 })
     out["issues"] = issues_norm
 
-    # next_steps as list[dict]
     steps_norm = []
     for it in _as_list(out.get("next_steps", [])):
         if isinstance(it, dict):
@@ -776,7 +822,6 @@ def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict
                 steps_norm.append({"action": s, "why": ""})
     out["next_steps"] = [s for s in steps_norm if s.get("action")][:8]
 
-    # hints as list[dict]
     hints_norm = []
     for it in _as_list(out.get("hints", [])):
         if isinstance(it, dict):
@@ -797,7 +842,6 @@ def normalize_feedback_for_ui(feedback: Dict[str, Any], *, part_id: str) -> Dict
                 hints_norm.append({"level": 1, "hint": s, "gives_final_answer": False})
     out["hints"] = [h for h in hints_norm if h.get("hint")][:6]
 
-    # questions_for_student as list[str]
     qs_norm = []
     for q in _as_list(out.get("questions_for_student", [])):
         s = _as_str(q).strip()
@@ -833,7 +877,6 @@ def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
 
     st.markdown("#### 🤖 AI Feedback")
     with st.container(border=True):
-        # Top metrics row
         c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
         conf = fb.get("confidence", 0.0)
         issues = fb.get("issues", [])
@@ -851,20 +894,17 @@ def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
         if summary:
             st.info(summary)
 
-        # Evidence quotes (nice, compact)
         evidence = fb.get("evidence_quotes", [])
         if evidence:
             with st.expander("Evidence from your work (quotes)", expanded=False):
                 for q in evidence:
                     st.markdown(f"• “{q}”")
 
-        # Tabs for clean layout
         tab_overview, tab_issues, tab_steps, tab_hints, tab_questions, tab_raw = st.tabs(
             ["Overview", "Issues", "Next steps", "Hints", "Questions", "Raw JSON"]
         )
 
         with tab_overview:
-            # Quick “what to do first” block: show high/medium issues then first steps
             high = [i for i in issues if i.get("severity") == "high"]
             med = [i for i in issues if i.get("severity") == "medium"]
             low = [i for i in issues if i.get("severity") == "low"]
@@ -885,7 +925,6 @@ def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
                 if why:
                     st.caption(why)
 
-            # Safety indicator
             safety = fb.get("safety", {})
             if safety.get("redactions_applied"):
                 st.warning("Some content was redacted to avoid revealing the final numeric answer.")
@@ -928,7 +967,6 @@ def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
             if not hints:
                 st.info("No hints were returned.")
             else:
-                # Sort by level: 1 (gentle) to 3 (stronger)
                 hints_sorted = sorted(hints, key=lambda h: int(h.get("level", 1)))
                 for h in hints_sorted:
                     lvl = int(h.get("level", 1))
@@ -974,6 +1012,7 @@ def render_ai_feedback_userfriendly(feedback: Dict[str, Any]) -> None:
 # Session state
 # -----------------------------
 def init_session_state() -> None:
+    st.session_state.setdefault("selected_class", None)
     st.session_state.setdefault("selected_assignment", None)
     st.session_state.setdefault("selected_problem_id", None)
     st.session_state.setdefault("active_problem_id", None)
@@ -987,17 +1026,26 @@ def init_session_state() -> None:
 # -----------------------------
 # Sidebar
 # -----------------------------
-def render_sidebar(assignments: dict) -> None:
+def render_sidebar(assignments_by_class: Dict[str, Dict[str, List[str]]]) -> None:
     st.sidebar.title("Navigation")
-    names = list(assignments.keys())
-    if not names:
-        st.sidebar.error("No assignments found.")
+    class_names = list(assignments_by_class.keys())
+    if not class_names:
+        st.sidebar.error("No classes found.")
         st.stop()
 
-    default_a = names.index(st.session_state["selected_assignment"]) if st.session_state["selected_assignment"] in names else 0
-    st.session_state["selected_assignment"] = st.sidebar.selectbox("Assignment", names, index=default_a)
+    default_c = class_names.index(st.session_state["selected_class"]) if st.session_state["selected_class"] in class_names else 0
+    st.session_state["selected_class"] = st.sidebar.selectbox("Class", class_names, index=default_c)
 
-    pids = assignments.get(st.session_state["selected_assignment"], [])
+    assignments_for_class = assignments_by_class.get(st.session_state["selected_class"], {})
+    assignment_names = list(assignments_for_class.keys())
+    if not assignment_names:
+        st.sidebar.warning("No assignments found in this class.")
+        st.stop()
+
+    default_a = assignment_names.index(st.session_state["selected_assignment"]) if st.session_state["selected_assignment"] in assignment_names else 0
+    st.session_state["selected_assignment"] = st.sidebar.selectbox("Assignment", assignment_names, index=default_a)
+
+    pids = assignments_for_class.get(st.session_state["selected_assignment"], [])
     if not pids:
         st.sidebar.warning("No problems in this assignment.")
         st.stop()
@@ -1017,8 +1065,9 @@ def render_sidebar_tabs(problem_id: str) -> None:
             st.caption("No attempts yet.")
         else:
             labels, ids = [], []
-            for created_utc, attempt_id in rows:
-                labels.append(f"{created_utc} ({attempt_id[:8]})")
+            for created_utc, attempt_id, class_name, assignment in rows:
+                class_label = f"{class_name} • " if class_name else ""
+                labels.append(f"{created_utc} ({attempt_id[:8]}) — {class_label}{assignment}")
                 ids.append(attempt_id)
 
             idx = st.selectbox("View", list(range(len(labels))), format_func=lambda i: labels[i])
@@ -1090,12 +1139,15 @@ def render_nomenclature_hint(problem: Dict[str, Any]) -> None:
 # -----------------------------
 # Main UI
 # -----------------------------
-def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
+def render_problem(problem: Dict[str, Any], class_name: str, assignment: str,
+                   answer_key: Dict[Tuple[str, str], Dict[str, str]]) -> None:
     pid = problem.get("problem_id", "")
     title = problem.get("title", pid)
     statement = problem.get("statement", "")
 
     st.markdown(f"## {title}")
+    st.markdown(f"**Class:** `{class_name}`")
+    st.markdown(f"**Assignment:** `{assignment}`")
     st.markdown(f"**Problem ID:** `{pid}`")
     if statement:
         st.markdown(statement.replace("\n", "  \n"))
@@ -1126,7 +1178,7 @@ def render_problem(problem: Dict[str, Any], assignment: str, answer_key: Dict[Tu
     submitted = st.button("Submit", key=f"submit_{pid}")
 
     if submitted:
-        attempt_id = log_attempt(assignment, pid)
+        attempt_id = log_attempt(class_name, assignment, pid)
 
         st.subheader("Results")
         results: Dict[str, Tuple[Optional[bool], str]] = {}
@@ -1211,10 +1263,16 @@ def render_per_part_uploads(problem: Dict[str, Any], problem_id: str, attempt_id
             st.warning("⚠️ We couldn’t extract enough text. Please fill the fallback form for AI feedback.")
 
         with st.expander(f"Fallback form for Part ({part_id})", expanded=fallback_expanded):
-            balance = st.text_area("Paste the balance(s)/equation(s) you used (text)", height=120,
-                                   key=f"fb_balance_{attempt_id}_{part_id}")
-            notes = st.text_area("Notes (what you tried / where you think the mistake is)", height=100,
-                                 key=f"fb_notes_{attempt_id}_{part_id}")
+            balance = st.text_area(
+                "Paste the balance(s)/equation(s) you used (text)",
+                height=120,
+                key=f"fb_balance_{attempt_id}_{part_id}"
+            )
+            notes = st.text_area(
+                "Notes (what you tried / where you think the mistake is)",
+                height=100,
+                key=f"fb_notes_{attempt_id}_{part_id}"
+            )
             if st.button("Save fallback info", key=f"fb_save_{attempt_id}_{part_id}"):
                 save_fallback(attempt_id, part_id, balance, notes)
                 st.success("✅ Fallback information saved.")
@@ -1284,9 +1342,10 @@ if HAS_OPENAI and st.secrets.get("OPENAI_API_KEY", None):
 else:
     st.sidebar.warning("AI: not connected (set OPENAI_API_KEY in Streamlit secrets)")
 
-assignments = load_assignments()
-render_sidebar(assignments)
+assignments_by_class = load_assignments()
+render_sidebar(assignments_by_class)
 
+class_name = st.session_state["selected_class"]
 assignment = st.session_state["selected_assignment"]
 problem_id = st.session_state["selected_problem_id"]
 
@@ -1295,4 +1354,4 @@ render_sidebar_tabs(problem_id)
 problem = load_problem(problem_id)
 answer_key = load_answer_key()
 
-render_problem(problem, assignment, answer_key)
+render_problem(problem, class_name, assignment, answer_key)
